@@ -12,6 +12,8 @@ class Capabilities(str, Enum):
     TRIGGER_QUARANTINE = "TRIGGER_QUARANTINE"
     MANAGE_USERS = "MANAGE_USERS"
     MANAGE_SETTINGS = "MANAGE_SETTINGS"
+    CREATE_ORGANIZATION = "CREATE_ORGANIZATION"
+    VIEW_SYSTEM_METRICS = "VIEW_SYSTEM_METRICS"
 
 # The structured permission matrix matching the blueprint specifications.
 # Defines exactly what each role is authorized to do at the API layer.
@@ -22,14 +24,17 @@ PERMISSION_MATRIX = {
         Capabilities.REVERSE_RESPONSE_ACTION,
         Capabilities.TRIGGER_QUARANTINE,
         Capabilities.MANAGE_USERS,
-        Capabilities.MANAGE_SETTINGS
+        Capabilities.MANAGE_SETTINGS,
+        Capabilities.CREATE_ORGANIZATION,
+        Capabilities.VIEW_SYSTEM_METRICS
     ],
     Role.ANALYST: [
         Capabilities.VIEW_SMART_SUMMARY,
         Capabilities.VIEW_RAW_LOGS,
         Capabilities.REVERSE_RESPONSE_ACTION,
-        Capabilities.TRIGGER_QUARANTINE
-        # Analysts cannot manage users or settings
+        Capabilities.TRIGGER_QUARANTINE,
+        Capabilities.VIEW_SYSTEM_METRICS
+        # Analysts cannot manage users, settings, or provision new orgs
     ],
     Role.VIEWER: [
         Capabilities.VIEW_SMART_SUMMARY
