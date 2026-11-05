@@ -3,7 +3,7 @@ import { Card, CardContent } from './ui/card';
 import { Button } from './ui/button';
 import { StatusBadge } from './StatusBadge';
 import { SeverityBadge } from './SeverityBadge';
-import { ShieldAlert, Server, ArrowRight, Clock, Undo2, Activity } from 'lucide-react';
+import { ShieldAlert, Server, ArrowRight, Clock, Undo2, Activity, Layers } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 
 export const IncidentCard = ({ incident, onSelect, onOpenResponseDialog, onSelectDevice }) => {
@@ -58,6 +58,14 @@ export const IncidentCard = ({ incident, onSelect, onOpenResponseDialog, onSelec
               {incident.response_action && (
                 <span className="text-[10px] font-mono font-semibold uppercase px-2 py-0.5 rounded bg-[#b83a2e]/10 text-[#b83a2e] border border-[#b83a2e]/60">
                   {incident.response_action}
+                </span>
+              )}
+
+              {/* Multi-Stage Attack Chain Badge */}
+              {incident.attack_chain && incident.attack_chain.length > 0 && (
+                <span className="text-[10px] font-mono font-semibold uppercase px-2 py-0.5 rounded bg-[#cc5500]/15 text-[#cc5500] border border-[#cc5500]/40 flex items-center gap-1">
+                  <Layers className="w-2.5 h-2.5" />
+                  {incident.attack_chain.length} Attack Stages
                 </span>
               )}
             </div>

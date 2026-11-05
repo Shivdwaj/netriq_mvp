@@ -23,6 +23,12 @@ class IncidentItem(BaseModel):
     packets_transferred: Optional[int] = None
     source_label: Optional[str] = None
     target_label: Optional[str] = None
+    hostname: Optional[str] = None
+    mac: Optional[str] = None
+    user: Optional[str] = None
+    attack_chain: Optional[List[str]] = None
+    evidence: Optional[List[dict]] = None
+    recommended_investigation_steps: Optional[List[str]] = None
 
 class IncidentUpdateReq(BaseModel):
     status: Optional[str] = None

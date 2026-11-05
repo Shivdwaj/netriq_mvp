@@ -195,6 +195,15 @@ class MonitorService:
                     except Exception as b_err:
                         logger.debug(f"[MonitorService] Behavior inspection skipped: {b_err}")
 
+                    # Layer 2 Data Processing: Normalize and publish to Event Bus
+                    try:
+                        from backend.pipeline import normalizer, event_bus
+                        norm_event = normalizer.normalize_network_flow(flow)
+                        if norm_event:
+                            loop.create_task(event_bus.publish(norm_event))
+                    except Exception as p_err:
+                        logger.debug(f"[MonitorService] Flow normalization skipped: {p_err}")
+
                     features = FeatureExtractor.extract_features(flow)
                     result_dict = self.predictor.predict(features)
                     

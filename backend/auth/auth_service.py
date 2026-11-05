@@ -33,12 +33,11 @@ class AuthService:
     Note: Token extraction from HTTP headers is handled separately by middleware/auth.py.
     """
     async def seed_initial_users(self):
-        """Seeds default admin, analyst, and viewer accounts if missing."""
+        """Seeds default admin and analyst accounts if missing."""
         try:
             demo_users = [
                 ("admin@netriq.local", "admin", "AdminPassword123!", Role.ADMIN),
                 ("analyst@netriq.local", "analyst", "AnalystPassword123!", Role.ANALYST),
-                ("viewer@netriq.local", "viewer", "ViewerPassword123!", Role.VIEWER),
             ]
             for email, uname, pwd, r in demo_users:
                 existing = await users_repo.list({"$or": [{"email": email}, {"username": uname}]}, limit=1)

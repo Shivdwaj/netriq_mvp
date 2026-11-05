@@ -35,6 +35,7 @@ from backend.api.users import router as users_router
 from backend.api.settings import router as settings_router
 from backend.api.health import router as health_router
 from backend.api.behaviors import router as behaviors_router
+from backend.api.telemetry import router as telemetry_router
 from backend.api.websocket import router as websocket_router, websocket_endpoint
 
 logger = get_logger(__name__)
@@ -52,6 +53,15 @@ async def lifespan(app: FastAPI):
     from backend.auth.auth_service import AuthService
     await AuthService().seed_initial_users()
     app.state.response_engine = ResponseEngine()  # init AFTER DB is ready
+
+    # Engage Layer 4 Correlation Engine on EventBus
+    try:
+        from backend.pipeline import event_bus
+        from backend.services.correlation_service import correlation_engine
+        event_bus.subscribe(correlation_engine.process_event)
+        logger.info("[Startup] Layer 4 Security Intelligence Correlator subscribed to EventBus.")
+    except Exception as corr_err:
+        logger.warning(f"[Startup] Could not subscribe correlation engine: {corr_err}")
 
     # Auto-engage live hardware packet monitoring on Npcap physical NIC
     try:
@@ -127,6 +137,7 @@ app.include_router(users_router, prefix="/api/v1")
 app.include_router(settings_router, prefix="/api/v1")
 app.include_router(health_router, prefix="/api/v1")
 app.include_router(behaviors_router, prefix="/api/v1")
+app.include_router(telemetry_router, prefix="/api/v1")
 app.include_router(health_router)  # Also expose root /health for docker/lb health checks
 app.include_router(websocket_router)  # WebSockets sit at root /ws
 app.websocket("/ws")(websocket_endpoint)

@@ -443,6 +443,91 @@ export const IncidentDetailDrawer = ({
                   </div>
                 </div>
 
+                {/* 1.5 INTELLIGENCE-DRIVEN ATTACK CHAIN & INVESTIGATION PLAYBOOK */}
+                {((incident.attack_chain && incident.attack_chain.length > 0) || (incident.recommended_investigation_steps && incident.recommended_investigation_steps.length > 0)) && (
+                  <div className="bg-[#4a3330] border border-[#6b4c45] rounded-lg p-5 space-y-4">
+                    {/* Header */}
+                    <div className="flex items-center justify-between pb-3 border-b border-[#6b4c45]">
+                      <div className="flex items-center gap-2">
+                        <Layers className="w-4 h-4 text-[#cc5500]" />
+                        <h2 className="text-xs font-bold uppercase tracking-wider text-[#f8f4e7] font-sans">
+                          Intelligence-Driven Attack Chain & Investigation Guidance
+                        </h2>
+                      </div>
+                      <span className="text-[10px] font-mono font-semibold px-2 py-0.5 rounded bg-[#cc5500]/15 text-[#cc5500] border border-[#cc5500]/40">
+                        CORRELATED INCIDENT
+                      </span>
+                    </div>
+
+                    {/* Attack Chain Stages */}
+                    {incident.attack_chain && incident.attack_chain.length > 0 && (
+                      <div className="space-y-2">
+                        <span className="text-[11px] font-mono uppercase font-semibold text-[#c4956a] tracking-wider block">
+                          Attack Progression Timeline (MITRE ATT&CK)
+                        </span>
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                          {incident.attack_chain.map((stageText, sIdx) => {
+                            const [stageTitle, stageDesc] = stageText.split(/ [—-] /);
+                            return (
+                              <div
+                                key={sIdx}
+                                className="p-3 rounded-lg bg-[#3b2a27] border border-[#6b4c45] space-y-1 relative"
+                              >
+                                <div className="flex items-center justify-between">
+                                  <span className="text-[11px] font-mono font-bold text-[#cc5500]">
+                                    {stageTitle || stageText}
+                                  </span>
+                                  <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-[#4a3330] text-[#d4bfb0] border border-[#6b4c45]">
+                                    Stage {sIdx + 1}
+                                  </span>
+                                </div>
+                                {stageDesc && (
+                                  <p className="text-[11px] font-sans text-[#d4bfb0] leading-snug">
+                                    {stageDesc}
+                                  </p>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Recommended Investigation Steps */}
+                    {incident.recommended_investigation_steps && incident.recommended_investigation_steps.length > 0 && (
+                      <div className="pt-2 border-t border-[#6b4c45]/60 space-y-2">
+                        <span className="text-[11px] font-mono uppercase font-semibold text-[#cc5500] tracking-wider block">
+                          Recommended Investigation Steps & Triage Checklist
+                        </span>
+                        <div className="space-y-2">
+                          {incident.recommended_investigation_steps.map((step, idx) => (
+                            <div
+                              key={idx}
+                              className="flex items-start justify-between gap-3 p-2.5 rounded bg-[#3b2a27] border border-[#6b4c45]"
+                            >
+                              <div className="flex items-start gap-2.5">
+                                <CheckCircle2 className="w-4 h-4 text-[#cc5500] shrink-0 mt-0.5" />
+                                <span className="text-xs font-sans text-[#f8f4e7] leading-relaxed">
+                                  {step}
+                                </span>
+                              </div>
+                              {canModify && idx === 0 && (
+                                <button
+                                  type="button"
+                                  onClick={() => onOpenResponseDialog && onOpenResponseDialog('quarantine', srcIp)}
+                                  className="text-[10px] font-mono font-bold uppercase px-2.5 py-1 rounded bg-[#b83a2e] hover:bg-[#d04535] text-[#f8f4e7] shrink-0 transition-colors cursor-pointer"
+                                >
+                                  1-Click Quarantine
+                                </button>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 {/* 2. DETECTION REASONING & ANALYST INVESTIGATION NOTES */}
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                   {/* Left: AI Verdict Evidence */}
