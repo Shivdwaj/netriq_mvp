@@ -528,6 +528,70 @@ export const IncidentDetailDrawer = ({
                   </div>
                 )}
 
+                {/* 1.6 MULTI-ENGINE DETECTION FORENSICS & EVIDENCE */}
+                {incident.evidence && incident.evidence.length > 0 && (
+                  <div className="bg-[#4a3330] border border-[#6b4c45] rounded-lg p-5 space-y-3">
+                    <div className="flex items-center justify-between pb-3 border-b border-[#6b4c45]">
+                      <div className="flex items-center gap-2">
+                        <ShieldAlert className="w-4 h-4 text-[#cc5500]" />
+                        <h2 className="text-xs font-bold uppercase tracking-wider text-[#f8f4e7] font-sans">
+                          Multi-Engine Detection Evidence ({incident.evidence.length} Indicators)
+                        </h2>
+                      </div>
+                      <span className="text-[10px] font-mono text-[#d4bfb0]">
+                        Suricata + Zeek + NetrIQ Fusion
+                      </span>
+                    </div>
+
+                    <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
+                      {incident.evidence.map((evItem, eIdx) => {
+                        const sourceName = (evItem.source || evItem.type || 'netriq').toLowerCase();
+                        const badgeColor =
+                          sourceName.includes('suricata')
+                            ? 'bg-[#b83a2e]/20 text-[#b83a2e] border-[#b83a2e]/40'
+                            : sourceName.includes('zeek')
+                            ? 'bg-[#cc5500]/20 text-[#cc5500] border-[#cc5500]/40'
+                            : sourceName.includes('behaviour')
+                            ? 'bg-[#cc8833]/20 text-[#cc8833] border-[#cc8833]/40'
+                            : 'bg-[#c4956a]/20 text-[#c4956a] border-[#c4956a]/40';
+
+                        return (
+                          <div
+                            key={eIdx}
+                            className="flex items-start justify-between gap-3 p-2.5 rounded bg-[#3b2a27] border border-[#6b4c45] text-xs font-sans"
+                          >
+                            <div className="space-y-1">
+                              <div className="flex items-center gap-2">
+                                <span className={`text-[9px] font-mono font-bold uppercase px-1.5 py-0.5 rounded border ${badgeColor}`}>
+                                  {sourceName.toUpperCase()}
+                                </span>
+                                {evItem.mitre && (
+                                  <span className="text-[10px] font-mono text-[#c4956a]">
+                                    [{evItem.mitre}]
+                                  </span>
+                                )}
+                                {evItem.rule_id && (
+                                  <span className="text-[10px] font-mono text-[#a08070]">
+                                    {evItem.rule_id}
+                                  </span>
+                                )}
+                              </div>
+                              <p className="text-[#f8f4e7] font-medium leading-snug">
+                                {evItem.summary || evItem.title || evItem.details?.signature || 'Telemetry observation'}
+                              </p>
+                            </div>
+                            {evItem.dst_port && (
+                              <span className="font-mono text-[11px] text-[#d4bfb0] shrink-0 bg-[#4a3330] px-2 py-0.5 rounded border border-[#6b4c45]">
+                                Port {evItem.dst_port}
+                              </span>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
                 {/* 2. DETECTION REASONING & ANALYST INVESTIGATION NOTES */}
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                   {/* Left: AI Verdict Evidence */}
