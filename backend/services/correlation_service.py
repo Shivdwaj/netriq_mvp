@@ -269,33 +269,107 @@ class CorrelationEngine:
         if has_c2:
             attack_chain.append(f"Stage 5: Command & Control (T1071) - Anomalous outbound communication established")
 
-        # Must meet correlation criteria: 2+ stages OR critical offensive process OR high-volume scan
-        should_trigger = len(attack_chain) >= 2 or has_malicious_proc or (is_port_scan and unique_ports >= 15)
+        # Must meet correlation criteria: 2+ stages OR critical offensive process OR port scan OR 3+ correlated observations
+        obs_count = len(tracker.events)
+        should_trigger = len(attack_chain) >= 2 or has_malicious_proc or is_port_scan or obs_count >= 3
         if not should_trigger:
             return
 
-        # Step 6: Contextual Severity Calculation
+        # Step 6A: Contextual Severity Calculation (Impact / Business Risk)
         # Context Factors: stages count, crown jewel presence, user elevation
         device = latest_event.device
         is_elevated = device.logged_in_user in ("root", "Administrator")
         
-        severity_score = len(attack_chain) * 25
+        severity_score = 0
         if has_crown_jewel:
+            severity_score += 40
+        if has_c2:
             severity_score += 30
+        if has_lateral:
+            severity_score += 25
         if has_malicious_proc:
             severity_score += 25
+        if is_port_scan:
+            severity_score += 15
         if is_elevated:
             severity_score += 15
 
-        if severity_score >= 70 or has_crown_jewel or len(attack_chain) >= 3:
+        # Multi-stage amplifier
+        if len(attack_chain) >= 2:
+            severity_score += (len(attack_chain) - 1) * 10
+
+        if severity_score >= 65 or has_crown_jewel or len(attack_chain) >= 3:
             severity = "CRITICAL"
-            confidence = 0.96
         elif severity_score >= 40:
             severity = "HIGH"
-            confidence = 0.89
-        else:
+        elif severity_score >= 20:
             severity = "MEDIUM"
-            confidence = 0.82
+        else:
+            severity = "LOW"
+
+        # Step 6B: Evidentiary Confidence Calculation (Certainty / Proof of Occurrence)
+        # Independent of Severity: evaluating sensor agreement, repetition count, and TCP states
+        sources = {e.get("source") for e in tracker.events if e.get("source")}
+        engine_count = len(sources)
+
+        # Baseline confidence from observation volume
+        if obs_count >= 10:
+            conf_score = 0.75
+        elif obs_count >= 5:
+            conf_score = 0.65
+        elif obs_count >= 3:
+            conf_score = 0.55
+        else:
+            conf_score = 0.45
+
+        # Multi-engine corroboration bonus
+        if engine_count >= 3:
+            conf_score += 0.20 # Suricata + Zeek + NetrIQ Rule/Behaviour all agree
+        elif engine_count == 2:
+            conf_score += 0.12 # e.g. Zeek + Suricata agree
+
+        # Handshake / Exploit confirmation check
+        has_established_session = any(
+            e.get("details", {}).get("conn_state") == "SF" or e.get("conn_state") == "SF"
+            for e in tracker.events
+        )
+        has_verified_signature = any(
+            e.get("source") in ("suricata", "detection_signature")
+            for e in tracker.events
+        )
+        if has_established_session and has_verified_signature:
+            conf_score += 0.15
+        elif has_established_session:
+            conf_score += 0.08
+
+        # Clamp between 0.35 and 0.99
+        confidence = round(max(0.35, min(0.99, conf_score)), 2)
+
+        # Qualitative Confidence Label
+        if confidence >= 0.90:
+            confidence_label = "CONFIRMED"
+        elif confidence >= 0.75:
+            confidence_label = "PROBABLE"
+        elif confidence >= 0.60:
+            confidence_label = "SUSPECTED"
+        else:
+            confidence_label = "NEEDS_VALIDATION"
+
+        # Determine Incident Classification / Title
+        if len(attack_chain) >= 2:
+            incident_type = f"Correlated Attack Chain: {' -> '.join([s.split(' - ')[0] for s in attack_chain])}"
+        elif has_crown_jewel:
+            incident_type = "Crown Jewel Access Attempt"
+        elif has_lateral:
+            incident_type = "Lateral Movement Activity"
+        elif has_c2:
+            incident_type = "Suspected C2 Communication"
+        elif has_malicious_proc:
+            incident_type = "Malicious Process Execution"
+        elif is_port_scan or obs_count >= 3:
+            incident_type = "Possible reconnaissance"
+        else:
+            incident_type = "Suspicious Network Activity"
 
         # Step 7: Formulate Recommended Investigation Steps (Actionable SOC Playbook)
         hostname = device.hostname or "the host"
@@ -312,14 +386,16 @@ class CorrelationEngine:
         if has_crown_jewel:
             investigation_steps.insert(2, f"Targeted high-value internal asset detected: Check database access audit logs for unauthorized queries.")
 
-        title = f"Correlated Attack Chain ({severity}): {' -> '.join([s.split(' - ')[0] for s in attack_chain])}"
+        title = f"{incident_type} ({severity})"
 
         await self._upsert_incident(
             tracker=tracker,
             event=latest_event,
             title=title,
+            incident_type=incident_type,
             severity=severity,
             confidence=confidence,
+            confidence_label=confidence_label,
             attack_chain=attack_chain,
             investigation_steps=investigation_steps
         )
@@ -329,8 +405,10 @@ class CorrelationEngine:
         tracker: DeviceActivityTracker,
         event: NormalizedSecurityEvent,
         title: str,
+        incident_type: str,
         severity: str,
         confidence: float,
+        confidence_label: str,
         attack_chain: List[str],
         investigation_steps: List[str]
     ):
@@ -351,6 +429,8 @@ class CorrelationEngine:
                     "event_count": len(tracker.events),
                     "severity": severity,
                     "confidence": confidence,
+                    "confidence_label": confidence_label,
+                    "incident_type": incident_type,
                     "description": title,
                     "attack_chain": attack_chain,
                     "evidence": evidence_slice,
@@ -364,6 +444,7 @@ class CorrelationEngine:
         # Create New Incident
         incident_doc = {
             "status": "active",
+            "incident_type": incident_type,
             "severity": severity,
             "title": title,
             "description": title,
@@ -377,6 +458,7 @@ class CorrelationEngine:
             "mac": target_mac,
             "user": target_user,
             "confidence": confidence,
+            "confidence_label": confidence_label,
             "evidence": evidence_slice,
             "recommended_investigation_steps": investigation_steps,
             "response_action": "quarantine_recommended" if severity == "CRITICAL" else "alert_analyst",

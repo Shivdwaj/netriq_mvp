@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Button } from './ui/button';
 import { StatusBadge } from './StatusBadge';
 import { SeverityBadge } from './SeverityBadge';
+import { ConfidenceBadge } from './ConfidenceBadge';
 import { DeviceActivityDrawer } from './DeviceActivityDrawer';
 import { historyService } from '../services/history';
 import { monitoringService } from '../services/monitoring';
@@ -599,24 +600,38 @@ export const IncidentDetailDrawer = ({
                     <div className="flex items-center justify-between">
                       <h3 className="text-xs font-semibold uppercase tracking-wider text-[#d4bfb0] font-sans flex items-center gap-1.5">
                         <Sparkles className="w-3.5 h-3.5 text-[#cc5500]" />
-                        Detection Intelligence & Verdict
+                        Intelligence Assessment
                       </h3>
-                      <span className="text-xs font-mono font-bold text-[#cc5500] bg-[#cc5500]/15 px-2 py-0.5 rounded border border-[#cc5500]/30">
-                        {confidence}% AI Confidence
-                      </span>
+                      <ConfidenceBadge
+                        confidence={incident.confidence || confidence}
+                        label={incident.confidence_label}
+                        size="small"
+                      />
                     </div>
 
                     <div className="p-3 rounded bg-[#3b2a27] border border-[#6b4c45] text-xs font-sans text-[#f8f4e7] leading-relaxed">
-                      {incident.description || 'Behavioral anomaly detected on internal subnet. Persistent outbound flows matched threat signature profile.'}
+                      {incident.description || 'Correlated security incident across network and host observation streams.'}
                     </div>
 
                     <div className="grid grid-cols-2 gap-2 text-xs font-mono">
                       <div className="p-2.5 rounded bg-[#3b2a27] border border-[#6b4c45]">
-                        <span className="text-[#a08070] block text-[10px] uppercase">Inspection Engine</span>
-                        <span className="text-[#f8f4e7] font-semibold">DualLayerFusion Model</span>
+                        <span className="text-[#a08070] block text-[10px] uppercase">Contextual Severity (Impact)</span>
+                        <span className="text-[#f8f4e7] font-semibold">{incident.severity || 'MEDIUM'}</span>
                       </div>
                       <div className="p-2.5 rounded bg-[#3b2a27] border border-[#6b4c45]">
-                        <span className="text-[#a08070] block text-[10px] uppercase">Enforcement Action</span>
+                        <span className="text-[#a08070] block text-[10px] uppercase">Corroborated Evidence</span>
+                        <span className="text-[#cc5500] font-semibold">
+                          {incident.evidence ? incident.evidence.length : 0} observations
+                        </span>
+                      </div>
+                      <div className="p-2.5 rounded bg-[#3b2a27] border border-[#6b4c45]">
+                        <span className="text-[#a08070] block text-[10px] uppercase">Incident Type</span>
+                        <span className="text-[#c4956a] font-semibold truncate block">
+                          {incident.incident_type || 'Reconnaissance'}
+                        </span>
+                      </div>
+                      <div className="p-2.5 rounded bg-[#3b2a27] border border-[#6b4c45]">
+                        <span className="text-[#a08070] block text-[10px] uppercase">Recommended Action</span>
                         <span className="text-[#b83a2e] font-semibold">{action}</span>
                       </div>
                     </div>

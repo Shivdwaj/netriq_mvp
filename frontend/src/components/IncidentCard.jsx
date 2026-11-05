@@ -3,6 +3,7 @@ import { Card, CardContent } from './ui/card';
 import { Button } from './ui/button';
 import { StatusBadge } from './StatusBadge';
 import { SeverityBadge } from './SeverityBadge';
+import { ConfidenceBadge } from './ConfidenceBadge';
 import { ShieldAlert, Server, ArrowRight, Clock, Undo2, Activity, Layers } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 
@@ -53,6 +54,7 @@ export const IncidentCard = ({ incident, onSelect, onOpenResponseDialog, onSelec
               </span>
               <StatusBadge status={incident.status} />
               <SeverityBadge severity={incident.severity} size="small" />
+              <ConfidenceBadge confidence={incident.confidence} label={incident.confidence_label} size="small" />
 
               {/* Quarantine: dark red outline #b83a2e */}
               {incident.response_action && (
