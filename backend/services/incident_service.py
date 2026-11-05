@@ -145,6 +145,13 @@ class IncidentService:
             return None
         return await self._enrich_incident(inc)
 
+    async def get_required(self, incident_id: str, tenant_id: Optional[str] = None) -> Dict[str, Any]:
+        """Retrieves an incident by ID, guaranteeing a non-null dictionary or raising ValueError."""
+        inc = await self.get(incident_id, tenant_id=tenant_id)
+        if not inc:
+            raise ValueError(f"Incident {incident_id} not found or access denied")
+        return inc
+
     async def update_status(
         self,
         incident_id: str,
@@ -159,9 +166,7 @@ class IncidentService:
         New -> Investigating -> Confirmed / False Positive -> Resolved.
         Records an immutable audit entry.
         """
-        inc = await self.get(incident_id, tenant_id=tenant_id)
-        if not inc:
-            raise ValueError(f"Incident {incident_id} not found or access denied")
+        inc = await self.get_required(incident_id, tenant_id=tenant_id)
 
         norm_new_status = new_status.lower()
         curr_status = inc.get("status", IncidentStatus.NEW.value).lower()
@@ -208,7 +213,7 @@ class IncidentService:
         )
 
         logger.info(f"[IncidentManagement] Incident {incident_id} status changed from {curr_status} -> {norm_new_status} by {user}")
-        return await self.get(incident_id, tenant_id=tenant_id)
+        return await self.get_required(incident_id, tenant_id=tenant_id)
 
     async def assign_analyst(
         self,
@@ -219,9 +224,7 @@ class IncidentService:
         tenant_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """Assigns an incident to an analyst and advances state to Investigating if New."""
-        inc = await self.get(incident_id, tenant_id=tenant_id)
-        if not inc:
-            raise ValueError(f"Incident {incident_id} not found or access denied")
+        inc = await self.get_required(incident_id, tenant_id=tenant_id)
 
         curr_status = inc.get("status", IncidentStatus.NEW.value).lower()
         now = time.time()
@@ -258,7 +261,7 @@ class IncidentService:
         )
 
         logger.info(f"[IncidentManagement] Incident {incident_id} assigned to {assigned_to} by {user}")
-        return await self.get(incident_id, tenant_id=tenant_id)
+        return await self.get_required(incident_id, tenant_id=tenant_id)
 
     async def add_note(
         self,
@@ -268,9 +271,7 @@ class IncidentService:
         tenant_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """Appends a threaded investigation note and logs audit history."""
-        inc = await self.get(incident_id, tenant_id=tenant_id)
-        if not inc:
-            raise ValueError(f"Incident {incident_id} not found or access denied")
+        inc = await self.get_required(incident_id, tenant_id=tenant_id)
 
         now = time.time()
         now_iso = get_utc_iso_now()
@@ -305,7 +306,7 @@ class IncidentService:
         )
 
         logger.info(f"[IncidentManagement] Note added to Incident {incident_id} by {author}")
-        return await self.get(incident_id, tenant_id=tenant_id)
+        return await self.get_required(incident_id, tenant_id=tenant_id)
 
     async def change_severity(
         self,
@@ -316,9 +317,7 @@ class IncidentService:
         tenant_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """Overrides incident severity with mandatory justification logged in audit history."""
-        inc = await self.get(incident_id, tenant_id=tenant_id)
-        if not inc:
-            raise ValueError(f"Incident {incident_id} not found or access denied")
+        inc = await self.get_required(incident_id, tenant_id=tenant_id)
 
         old_severity = inc.get("severity", "LOW")
         norm_sev = new_severity.upper()
@@ -346,7 +345,7 @@ class IncidentService:
         )
 
         logger.info(f"[IncidentManagement] Incident {incident_id} severity changed from {old_severity} to {norm_sev} by {user}")
-        return await self.get(incident_id, tenant_id=tenant_id)
+        return await self.get_required(incident_id, tenant_id=tenant_id)
 
     async def attach_evidence(
         self,
@@ -357,9 +356,7 @@ class IncidentService:
         tenant_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """Attaches new forensic indicator or event to the incident."""
-        inc = await self.get(incident_id, tenant_id=tenant_id)
-        if not inc:
-            raise ValueError(f"Incident {incident_id} not found or access denied")
+        inc = await self.get_required(incident_id, tenant_id=tenant_id)
 
         now = time.time()
         now_iso = get_utc_iso_now()
@@ -388,20 +385,18 @@ class IncidentService:
         )
 
         logger.info(f"[IncidentManagement] Evidence attached to Incident {incident_id} by {user}")
-        return await self.get(incident_id, tenant_id=tenant_id)
+        return await self.get_required(incident_id, tenant_id=tenant_id)
 
     async def get_audit_history(self, incident_id: str, tenant_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """Returns the full chronological audit history for an incident."""
-        inc = await self.get(incident_id, tenant_id=tenant_id)
-        if not inc:
-            raise ValueError(f"Incident {incident_id} not found or access denied")
+        inc = await self.get_required(incident_id, tenant_id=tenant_id)
         return inc.get("audit_history", [])
 
     async def update(self, incident_id: str, updates: Dict[str, Any], tenant_id: Optional[str] = None) -> Dict[str, Any]:
         """General patch update handler with legacy support."""
         updates["updated_at"] = time.time()
         await incidents_repo.update(incident_id, updates)
-        return await self.get(incident_id, tenant_id=tenant_id)
+        return await self.get_required(incident_id, tenant_id=tenant_id)
 
     async def get_countermeasures(self, incident_id: str) -> Dict[str, Any]:
         """Generates tailored SOC countermeasures for a specific incident."""

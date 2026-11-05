@@ -194,7 +194,8 @@ class CentralManagementService:
 
         if req.software_version:
             updates["software_version"] = req.software_version
-            b_v = BENCHMARK_SOFTWARE_VERSIONS.get(sensor.get("software_type"), "1.0.0")
+            stype = str(sensor.get("software_type") or "")
+            b_v = BENCHMARK_SOFTWARE_VERSIONS.get(stype, "1.0.0")
             updates["is_version_outdated"] = req.software_version < b_v
 
         await sensors_repo.collection.update_one(

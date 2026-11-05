@@ -158,8 +158,8 @@ class CorrelationEngine:
             tracker = self._get_tracker(device_key)
 
             stage = None
-            ev_type_str = getattr(event.event_type, "value", str(event.event_type))
-            ev_source_str = getattr(event.detection_source, "value", str(event.detection_source))
+            ev_type_str = getattr(event.event_type, "value", event.event_type)
+            ev_source_str = getattr(event.detection_source, "value", event.detection_source)
 
             evidence_item = {
                 "event_id": event.event_id,
@@ -220,7 +220,7 @@ class CorrelationEngine:
                     evidence_item["mitre"] = mitre_code
                     evidence_item["summary"] = f"Known offensive / penetration binary execution: {proc_name} ({mitre_code})"
 
-                elif str(event.event_type) in ("network_connection", "connection"):
+                elif event.event_type in ("network_connection", "connection"):
                     r_port = event.endpoint.remote_port or 0
                     if r_port in LATERAL_PORTS:
                         stage = "lateral_movement"
