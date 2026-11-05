@@ -15,6 +15,8 @@ class EventSource(str, Enum):
     NETWORK_SENSOR = "network_sensor"
     ENDPOINT_AGENT = "endpoint_agent"
     EXTERNAL_TAP = "external_tap"
+    SURICATA = "suricata"
+    ZEEK = "zeek"
 
 class DeviceIdentity(BaseModel):
     hostname: Optional[str] = "unknown"
