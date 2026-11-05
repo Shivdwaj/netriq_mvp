@@ -97,12 +97,62 @@ class CorrelationEngine:
         tracker.last_updated = now
         return tracker
 
+    async def process_detection(self, finding: Any, event: NormalizedSecurityEvent):
+        """
+        Ingests a high-fidelity DetectionFinding from Layer 3 (Signature, Rule, or Behaviour Engine)
+        and correlates it into the device's attack timeline.
+        """
+        try:
+            device_key = (event.device.ip if event.device else None) or finding.source_ip or event.source_ip or "unknown"
+            if device_key in ("unknown", "127.0.0.1", "0.0.0.0"):
+                return
+
+            now = time.time()
+            tracker = self._get_tracker(device_key)
+
+            stage = finding.mitre_stage or "reconnaissance"
+            engine_str = getattr(finding.engine_type, "value", str(finding.engine_type))
+            evidence_item = {
+                "event_id": event.event_id,
+                "finding_id": finding.finding_id,
+                "timestamp": now,
+                "type": f"detection_{engine_str}",
+                "source": engine_str,
+                "rule_id": finding.rule_id,
+                "title": finding.title,
+                "severity": finding.severity,
+                "confidence": finding.confidence,
+                "src_ip": finding.source_ip,
+                "dst_ip": finding.destination_ip,
+                "dst_port": finding.destination_port,
+                "protocol": finding.protocol,
+                "stage": stage,
+                "mitre": finding.mitre_technique or "T1046 Network Service Discovery",
+                "summary": finding.description,
+                "details": finding.evidence
+            }
+
+            tracker.events.append(evidence_item)
+            tracker.prune(now)
+            await self._evaluate_and_synthesize_incident(tracker, event)
+        except Exception as e:
+            logger.error(f"[CorrelationEngine] Error processing detection finding: {e}", exc_info=True)
+
     async def process_event(self, event: NormalizedSecurityEvent):
         """Asynchronous callback subscribed to the SecurityEventBus."""
         try:
             device_key = (event.device.ip if event.device else None) or event.source_ip or "unknown"
             if device_key == "unknown" or device_key == "127.0.0.1":
                 return
+
+            # 0. Dispatch to Layer 3 Detection Engines (Signature, Rule, Behaviour)
+            try:
+                from backend.detection import detection_manager
+                findings = detection_manager.evaluate(event)
+                for finding in findings:
+                    await self.process_detection(finding, event)
+            except Exception as det_err:
+                logger.debug(f"[CorrelationEngine] Layer 3 detection evaluation error: {det_err}")
 
             now = time.time()
             tracker = self._get_tracker(device_key)
