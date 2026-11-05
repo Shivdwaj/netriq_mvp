@@ -1,39 +1,60 @@
 import React from 'react';
-import { Search, CheckCircle2 } from 'lucide-react';
+import { Search, CheckCircle2, AlertOctagon, HelpCircle, ShieldAlert } from 'lucide-react';
 
-export const StatusBadge = ({ status = 'active', className = '' }) => {
-  const normStatus = (status || 'active').toLowerCase();
+export const StatusBadge = ({ status = 'new', className = '' }) => {
+  const normStatus = (status || 'new').toLowerCase();
 
-  if (normStatus === 'investigating') {
-    return (
-      <span
-        className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[11px] font-medium tracking-wide bg-[#cc8833]/15 text-[#cc8833] border border-[#cc8833]/30 ${className}`}
-      >
-        <Search className="w-3 h-3 text-[#cc8833]" />
-        INVESTIGATING
-      </span>
-    );
-  }
+  const configs = {
+    new: {
+      label: 'NEW',
+      bg: 'bg-[#b83a2e]/15 text-[#b83a2e] border-[#b83a2e]/40',
+      icon: ShieldAlert,
+      dot: 'bg-[#b83a2e]'
+    },
+    active: {
+      label: 'NEW',
+      bg: 'bg-[#b83a2e]/15 text-[#b83a2e] border-[#b83a2e]/40',
+      icon: ShieldAlert,
+      dot: 'bg-[#b83a2e]'
+    },
+    investigating: {
+      label: 'INVESTIGATING',
+      bg: 'bg-[#cc8833]/15 text-[#cc8833] border-[#cc8833]/40',
+      icon: Search,
+      dot: 'bg-[#cc8833]'
+    },
+    confirmed: {
+      label: 'CONFIRMED',
+      bg: 'bg-[#cc5500]/20 text-[#cc5500] border-[#cc5500]/50 font-bold',
+      icon: AlertOctagon,
+      dot: 'bg-[#cc5500]'
+    },
+    false_positive: {
+      label: 'FALSE POSITIVE',
+      bg: 'bg-[#3b2a27] text-[#a08070] border-[#6b4c45]',
+      icon: HelpCircle,
+      dot: 'bg-[#a08070]'
+    },
+    resolved: {
+      label: 'RESOLVED',
+      bg: 'bg-[#c4956a]/15 text-[#c4956a] border-[#c4956a]/40',
+      icon: CheckCircle2,
+      dot: 'bg-[#c4956a]'
+    }
+  };
 
-  if (normStatus === 'resolved') {
-    return (
-      <span
-        className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[11px] font-medium tracking-wide bg-[#cc5500]/15 text-[#cc5500] border border-[#cc5500]/30 ${className}`}
-      >
-        <CheckCircle2 className="w-3 h-3 text-[#cc5500]" />
-        RESOLVED
-      </span>
-    );
-  }
+  const current = configs[normStatus] || configs.new;
+  const Icon = current.icon;
 
-  // Default: 'active' or 'open' - formatted as critical state #b83a2e per design spec
   return (
     <span
-      className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[11px] font-medium tracking-wide bg-[#b83a2e]/15 text-[#b83a2e] border border-[#b83a2e]/30 ${className}`}
+      className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[10px] font-mono uppercase tracking-wide border ${current.bg} ${className}`}
     >
-      <span className="w-1.5 h-1.5 rounded-full bg-[#b83a2e] inline-block" />
-      ACTIVE
+      <span className={`w-1.5 h-1.5 rounded-full ${current.dot} inline-block`} />
+      <Icon className="w-2.5 h-2.5 shrink-0" />
+      {current.label}
     </span>
   );
 };
+
 export default StatusBadge;

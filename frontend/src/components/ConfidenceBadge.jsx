@@ -61,3 +61,4 @@ export const ConfidenceBadge = ({ confidence = 0.5, label, size = 'small' }) => 
     </span>
   );
 };
+
