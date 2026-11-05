@@ -84,6 +84,19 @@ export const IncidentCard = ({ incident, onSelect, onOpenResponseDialog, onSelec
                   <span className="text-[#cc8833]">●</span> {incident.assigned_to}
                 </span>
               )}
+              {/* Incident Type Badge */}
+              {incident.incident_type && (
+                <span className="text-[10px] font-mono uppercase px-2 py-0.5 rounded bg-[#3b2a27] text-[#c4956a] border border-[#6b4c45]">
+                  {incident.incident_type}
+                </span>
+              )}
+
+              {/* Assigned Analyst */}
+              {incident.assigned_to && (
+                <span className="text-[10px] font-sans px-2 py-0.5 rounded bg-[#3b2a27] text-[#d4bfb0] border border-[#6b4c45] flex items-center gap-1">
+                  <span className="text-[#cc8833]">●</span> {incident.assigned_to}
+                </span>
+              )}
             </div>
 
             {/* Main incident text: Warm White #f8f4e7 */}
@@ -119,7 +132,20 @@ export const IncidentCard = ({ incident, onSelect, onOpenResponseDialog, onSelec
                 ) : (
                   <span className="text-[#a08070]">Protected Host</span>
                 )}
-              </div>
+                {/* Incident Type Badge */}
+              {incident.incident_type && (
+                <span className="text-[10px] font-mono uppercase px-2 py-0.5 rounded bg-[#3b2a27] text-[#c4956a] border border-[#6b4c45]">
+                  {incident.incident_type}
+                </span>
+              )}
+
+              {/* Assigned Analyst */}
+              {incident.assigned_to && (
+                <span className="text-[10px] font-sans px-2 py-0.5 rounded bg-[#3b2a27] text-[#d4bfb0] border border-[#6b4c45] flex items-center gap-1">
+                  <span className="text-[#cc8833]">●</span> {incident.assigned_to}
+                </span>
+              )}
+            </div>
 
               {/* Direction Indicator */}
               <div className="flex items-center gap-1 text-[#a08070]">
@@ -127,7 +153,20 @@ export const IncidentCard = ({ incident, onSelect, onOpenResponseDialog, onSelec
                 <span className="text-[10px] font-mono uppercase bg-[#3b2a27] px-1 rounded text-[#c4956a]">
                   {incident.protocol || 'TCP'}
                 </span>
-              </div>
+                {/* Incident Type Badge */}
+              {incident.incident_type && (
+                <span className="text-[10px] font-mono uppercase px-2 py-0.5 rounded bg-[#3b2a27] text-[#c4956a] border border-[#6b4c45]">
+                  {incident.incident_type}
+                </span>
+              )}
+
+              {/* Assigned Analyst */}
+              {incident.assigned_to && (
+                <span className="text-[10px] font-sans px-2 py-0.5 rounded bg-[#3b2a27] text-[#d4bfb0] border border-[#6b4c45] flex items-center gap-1">
+                  <span className="text-[#cc8833]">●</span> {incident.assigned_to}
+                </span>
+              )}
+            </div>
 
               {/* Destination Target IP */}
               {incident.dst_ip && (
@@ -136,7 +175,20 @@ export const IncidentCard = ({ incident, onSelect, onOpenResponseDialog, onSelec
                     {incident.dst_ip}
                     {incident.dst_port ? `:${incident.dst_port}` : ''}
                   </span>
-                </div>
+                  {/* Incident Type Badge */}
+              {incident.incident_type && (
+                <span className="text-[10px] font-mono uppercase px-2 py-0.5 rounded bg-[#3b2a27] text-[#c4956a] border border-[#6b4c45]">
+                  {incident.incident_type}
+                </span>
+              )}
+
+              {/* Assigned Analyst */}
+              {incident.assigned_to && (
+                <span className="text-[10px] font-sans px-2 py-0.5 rounded bg-[#3b2a27] text-[#d4bfb0] border border-[#6b4c45] flex items-center gap-1">
+                  <span className="text-[#cc8833]">●</span> {incident.assigned_to}
+                </span>
+              )}
+            </div>
               )}
 
               {/* Created Timestamp */}
@@ -144,6 +196,19 @@ export const IncidentCard = ({ incident, onSelect, onOpenResponseDialog, onSelec
                 <Clock className="w-3 h-3 text-[#a08070]" />
                 {formatTimestamp(incident.created_at)}
               </span>
+              {/* Incident Type Badge */}
+              {incident.incident_type && (
+                <span className="text-[10px] font-mono uppercase px-2 py-0.5 rounded bg-[#3b2a27] text-[#c4956a] border border-[#6b4c45]">
+                  {incident.incident_type}
+                </span>
+              )}
+
+              {/* Assigned Analyst */}
+              {incident.assigned_to && (
+                <span className="text-[10px] font-sans px-2 py-0.5 rounded bg-[#3b2a27] text-[#d4bfb0] border border-[#6b4c45] flex items-center gap-1">
+                  <span className="text-[#cc8833]">●</span> {incident.assigned_to}
+                </span>
+              )}
             </div>
 
           </div>

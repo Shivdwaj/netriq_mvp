@@ -162,3 +162,4 @@ async def get_fleet_version_matrix(req: Request):
     except Exception as e:
         logger.error(f"Failed to retrieve version matrix: {e}", exc_info=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to retrieve software version matrix")
+

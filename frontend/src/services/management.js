@@ -70,3 +70,4 @@ export const managementService = {
     return response.data;
   }
 };
+

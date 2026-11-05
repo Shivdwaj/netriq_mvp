@@ -101,3 +101,4 @@ class DetectionRuleManifest(BaseModel):
     suricata_rules: List[Dict[str, Any]] = Field(default_factory=list) # SID, content, action
     netriq_rules: List[Dict[str, Any]] = Field(default_factory=list)    # Thresholds, patterns
     active_whitelists: List[str] = Field(default_factory=list)
+
