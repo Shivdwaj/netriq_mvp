@@ -5,7 +5,9 @@ from typing import List, Dict, Any, Optional
 from backend.pipeline.schemas import (
     NormalizedSecurityEvent,
     EventType,
-    EventSource,
+    DetectionSource,
+    format_utc_timestamp,
+    get_utc_iso_now,
     DeviceIdentity,
     NetworkDetails,
     EndpointDetails
@@ -28,12 +30,12 @@ def _determine_direction(src_ip: str, dst_ip: str) -> str:
 
 class EventNormalizer:
     """
-    Transforms raw heterogeneous sensor inputs into structured, normalized security events.
-    Enriches with device identity and applies deduplication filters.
+    Transforms raw heterogeneous sensor inputs into structured, normalized security events
+    adhering strictly to the NetrIQ Common Event Format (NCEF).
     """
 
     @staticmethod
-    def normalize_network_packet(pkt: Dict[str, Any], source: EventSource = EventSource.NETWORK_SENSOR) -> Optional[NormalizedSecurityEvent]:
+    def normalize_network_packet(pkt: Dict[str, Any], source: str = "netriq") -> Optional[NormalizedSecurityEvent]:
         """Normalizes a single captured IP packet from a SPAN port, TAP, or Npcap interface."""
         src_ip = pkt.get("src_ip")
         dst_ip = pkt.get("dst_ip")
@@ -50,26 +52,30 @@ class EventNormalizer:
         else:
             proto_name = str(proto_raw).upper()
 
-        network_details = NetworkDetails(
-            src_ip=src_ip,
-            dst_ip=dst_ip,
-            src_port=pkt.get("src_port", 0),
-            dst_port=pkt.get("dst_port", 0),
-            protocol=proto_name,
-            packet_count=1,
-            byte_count=pkt.get("length", 0),
-            tcp_flags=pkt.get("flags", []),
-            dns_query=pkt.get("dns_query"),
-            direction=_determine_direction(src_ip, dst_ip)
-        )
+        direction = _determine_direction(src_ip, dst_ip)
+        src_port = int(pkt.get("src_port") or 0)
+        dst_port = int(pkt.get("dst_port") or 0)
 
         event = NormalizedSecurityEvent(
-            timestamp=pkt.get("timestamp", time.time()),
-            event_type=EventType.NETWORK_FLOW,
-            source=source,
-            device=device,
-            network=network_details,
-            raw_metadata=pkt
+            tenant_id=pkt.get("tenant_id", "default"),
+            sensor_id=pkt.get("sensor_id", "sensor-netriq-01"),
+            timestamp=format_utc_timestamp(pkt.get("timestamp")),
+            ingestion_time=get_utc_iso_now(),
+            source_ip=src_ip,
+            destination_ip=dst_ip,
+            source_port=src_port,
+            destination_port=dst_port,
+            protocol=proto_name,
+            event_type="connection",
+            detection_source=str(source).lower(),
+            severity="INFO",
+            evidence=pkt,
+            network_interface=pkt.get("network_interface", "eth0"),
+            direction=direction,
+            flow_id=pkt.get("flow_id"),
+            rule_id=pkt.get("rule_id"),
+            event_version="1.0.0",
+            device=device
         )
 
         if deduplicator.is_duplicate(event):
@@ -78,7 +84,7 @@ class EventNormalizer:
         return event
 
     @staticmethod
-    def normalize_network_flow(flow: Any, source: EventSource = EventSource.NETWORK_SENSOR) -> Optional[NormalizedSecurityEvent]:
+    def normalize_network_flow(flow: Any, source: str = "netriq") -> Optional[NormalizedSecurityEvent]:
         """Normalizes a bi-directional network flow record produced by FlowBuilder."""
         src_ip = getattr(flow, "src_ip", "")
         dst_ip = getattr(flow, "dst_ip", "")
@@ -86,25 +92,38 @@ class EventNormalizer:
             return None
 
         device = identity_resolver.resolve(ip=src_ip)
-        network_details = NetworkDetails(
-            src_ip=src_ip,
-            dst_ip=dst_ip,
-            src_port=getattr(flow, "src_port", 0),
-            dst_port=getattr(flow, "dst_port", 0),
-            protocol=str(getattr(flow, "protocol", "TCP")),
-            packet_count=getattr(flow, "packet_count", 1),
-            byte_count=getattr(flow, "byte_count", 0),
-            tcp_flags=getattr(flow, "tcp_flags", []),
-            direction=_determine_direction(src_ip, dst_ip)
-        )
+        direction = _determine_direction(src_ip, dst_ip)
+
+        start_time = getattr(flow, "start_time", time.time())
+        duration = getattr(flow, "duration", 0.0)
+
+        evidence = {
+            "duration": duration,
+            "packet_count": getattr(flow, "packet_count", 1),
+            "byte_count": getattr(flow, "byte_count", 0),
+            "tcp_flags": getattr(flow, "tcp_flags", [])
+        }
 
         event = NormalizedSecurityEvent(
-            timestamp=getattr(flow, "start_time", time.time()),
-            event_type=EventType.NETWORK_FLOW,
-            source=source,
-            device=device,
-            network=network_details,
-            raw_metadata={"duration": getattr(flow, "duration", 0.0)}
+            tenant_id="default",
+            sensor_id="sensor-netriq-01",
+            timestamp=format_utc_timestamp(start_time),
+            ingestion_time=get_utc_iso_now(),
+            source_ip=src_ip,
+            destination_ip=dst_ip,
+            source_port=getattr(flow, "src_port", 0),
+            destination_port=getattr(flow, "dst_port", 0),
+            protocol=str(getattr(flow, "protocol", "TCP")).upper(),
+            event_type="connection",
+            detection_source=str(source).lower(),
+            severity="INFO",
+            evidence=evidence,
+            network_interface="eth0",
+            direction=direction,
+            flow_id=getattr(flow, "flow_id", None),
+            rule_id=None,
+            event_version="1.0.0",
+            device=device
         )
 
         if deduplicator.is_duplicate(event):
@@ -116,17 +135,18 @@ class EventNormalizer:
     def normalize_endpoint_telemetry(payload: Dict[str, Any]) -> List[NormalizedSecurityEvent]:
         """
         Decomposes complex agent telemetry into standardized atomic events:
-        - Device registration / identity update
+        - User authentication events
         - Process execution metadata events
         - Network socket / connection events
-        - User authentication events
         """
         now = payload.get("timestamp") or time.time()
         mac = payload.get("mac")
-        ip = payload.get("ip")
+        ip = payload.get("ip") or "127.0.0.1"
         hostname = payload.get("hostname", "unknown")
         user = payload.get("logged_in_user")
         os_name = payload.get("os")
+        tenant_id = payload.get("tenant_id", "default")
+        sensor_id = f"agent-{mac}" if mac else "agent-endpoint-01"
 
         # 1. Update identity resolver
         device = identity_resolver.register_device(
@@ -143,28 +163,33 @@ class EventNormalizer:
         # 2. Authentication Events
         auth_events = payload.get("auth_events", [])
         if not auth_events and user:
-            # Synthetic session event for current user
             auth_events = [{"user": user, "status": "active_session", "time": now}]
 
         for auth in auth_events:
             ev = NormalizedSecurityEvent(
-                timestamp=auth.get("time", now),
-                event_type=EventType.USER_AUTHENTICATION,
-                source=EventSource.ENDPOINT_AGENT,
+                tenant_id=tenant_id,
+                sensor_id=sensor_id,
+                timestamp=format_utc_timestamp(auth.get("time", now)),
+                ingestion_time=get_utc_iso_now(),
+                source_ip=ip,
+                destination_ip=ip,
+                protocol="LOCAL",
+                event_type="user_authentication",
+                detection_source="endpoint_agent",
+                severity="INFO",
+                evidence=auth,
+                direction="internal",
                 device=device,
                 endpoint=EndpointDetails(
                     user=auth.get("user", user),
-                    auth_status=auth.get("status", "success"),
-                    event_action="session_heartbeat"
-                ),
-                raw_metadata=auth
+                    auth_status=auth.get("status", "success")
+                )
             )
             if not deduplicator.is_duplicate(ev):
                 normalized_events.append(ev)
 
         # 3. Process Execution Events
         processes = payload.get("processes", [])
-        # If agent sent simple process names list
         if not processes and payload.get("sample_processes"):
             processes = [{"name": p} for p in payload.get("sample_processes", [])]
 
@@ -174,9 +199,19 @@ class EventNormalizer:
             proc_name = proc.get("name", "")
             is_susp = proc_name.lower() in suspicious_set or proc.get("is_suspicious", False)
             ev = NormalizedSecurityEvent(
-                timestamp=proc.get("timestamp", now),
-                event_type=EventType.PROCESS_EXECUTION,
-                source=EventSource.ENDPOINT_AGENT,
+                tenant_id=tenant_id,
+                sensor_id=sensor_id,
+                timestamp=format_utc_timestamp(proc.get("timestamp", now)),
+                ingestion_time=get_utc_iso_now(),
+                source_ip=ip,
+                destination_ip=ip,
+                protocol="LOCAL",
+                event_type="process_execution",
+                detection_source="endpoint_agent",
+                severity="HIGH" if is_susp else "INFO",
+                rule_id="BLACK_LIST_PROC" if is_susp else None,
+                evidence=proc,
+                direction="internal",
                 device=device,
                 endpoint=EndpointDetails(
                     pid=proc.get("pid"),
@@ -187,8 +222,7 @@ class EventNormalizer:
                     user=proc.get("user", user),
                     is_suspicious=is_susp,
                     suspicious_reason="Blacklisted tool pattern" if is_susp else None
-                ),
-                raw_metadata=proc
+                )
             )
             if not deduplicator.is_duplicate(ev):
                 normalized_events.append(ev)
@@ -196,33 +230,34 @@ class EventNormalizer:
         # 4. Network Connections Reported by Endpoint
         connections = payload.get("connections", [])
         for conn in connections:
-            remote_ip = conn.get("remote_ip")
-            remote_port = conn.get("remote_port", 0)
-            local_port = conn.get("local_port", 0)
+            remote_ip = conn.get("remote_ip") or "0.0.0.0"
+            remote_port = int(conn.get("remote_port") or 0)
+            local_port = int(conn.get("local_port") or 0)
             state = conn.get("state", "ESTABLISHED")
 
             ev = NormalizedSecurityEvent(
-                timestamp=conn.get("timestamp", now),
-                event_type=EventType.NETWORK_CONNECTION,
-                source=EventSource.ENDPOINT_AGENT,
+                tenant_id=tenant_id,
+                sensor_id=sensor_id,
+                timestamp=format_utc_timestamp(conn.get("timestamp", now)),
+                ingestion_time=get_utc_iso_now(),
+                source_ip=ip,
+                destination_ip=remote_ip,
+                source_port=local_port,
+                destination_port=remote_port,
+                protocol=conn.get("protocol", "TCP").upper(),
+                event_type="network_connection",
+                detection_source="endpoint_agent",
+                severity="INFO",
+                evidence=conn,
+                direction=_determine_direction(ip, remote_ip),
                 device=device,
                 endpoint=EndpointDetails(
                     pid=conn.get("pid"),
-                    process_name=conn.get("process_name"),
                     connection_state=state,
                     local_port=local_port,
                     remote_ip=remote_ip,
                     remote_port=remote_port
-                ),
-                network=NetworkDetails(
-                    src_ip=ip or "127.0.0.1",
-                    dst_ip=remote_ip or "0.0.0.0",
-                    src_port=local_port,
-                    dst_port=remote_port,
-                    protocol=conn.get("protocol", "TCP"),
-                    direction=_determine_direction(ip or "127.0.0.1", remote_ip or "0.0.0.0")
-                ) if remote_ip else None,
-                raw_metadata=conn
+                )
             )
             if not deduplicator.is_duplicate(ev):
                 normalized_events.append(ev)
@@ -230,4 +265,3 @@ class EventNormalizer:
         return normalized_events
 
 normalizer = EventNormalizer()
-

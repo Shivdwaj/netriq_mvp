@@ -30,3 +30,4 @@ class BaseEventAdapter(ABC):
             if event:
                 results.append(event)
         return results
+

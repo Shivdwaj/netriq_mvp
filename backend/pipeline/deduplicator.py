@@ -23,18 +23,18 @@ class EventDeduplicator:
         - Endpoint connection: device mac/ip, remote_ip, remote_port, connection_state
         - Endpoint auth: device mac/ip, user, auth_status
         """
-        parts = [event.event_type.value, event.source.value]
+        parts = [str(event.event_type), str(event.detection_source)]
 
-        if event.network:
+        if event.source_ip and event.destination_ip and event.destination_port:
             parts.extend([
-                str(event.network.src_ip),
-                str(event.network.dst_ip),
-                str(event.network.dst_port),
-                str(event.network.protocol)
+                str(event.source_ip),
+                str(event.destination_ip),
+                str(event.destination_port),
+                str(event.protocol)
             ])
         elif event.endpoint:
             parts.extend([
-                str(event.device.mac or event.device.ip),
+                str((event.device.mac if event.device else None) or event.source_ip),
                 str(event.endpoint.process_name or ""),
                 str(event.endpoint.remote_ip or ""),
                 str(event.endpoint.remote_port or ""),
@@ -43,7 +43,7 @@ class EventDeduplicator:
                 str(event.endpoint.auth_status or "")
             ])
         else:
-            parts.append(str(event.device.mac or event.device.ip))
+            parts.append(str((event.device.mac if event.device else None) or event.source_ip))
 
         raw_str = "|".join(parts)
         return hashlib.sha256(raw_str.encode("utf-8")).hexdigest()

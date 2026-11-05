@@ -100,29 +100,32 @@ class CorrelationEngine:
     async def process_event(self, event: NormalizedSecurityEvent):
         """Asynchronous callback subscribed to the SecurityEventBus."""
         try:
-            device_key = event.device.ip or event.device.mac or "unknown"
+            device_key = (event.device.ip if event.device else None) or event.source_ip or "unknown"
             if device_key == "unknown" or device_key == "127.0.0.1":
                 return
 
-            now = event.timestamp or time.time()
+            now = time.time()
             tracker = self._get_tracker(device_key)
 
             stage = None
+            ev_type_str = getattr(event.event_type, "value", str(event.event_type))
+            ev_source_str = getattr(event.detection_source, "value", str(event.detection_source))
+
             evidence_item = {
                 "event_id": event.event_id,
                 "timestamp": now,
-                "type": event.event_type.value,
-                "source": event.source.value
+                "type": ev_type_str,
+                "source": ev_source_str
             }
 
             # 1. Step 1-3: Detect, Identify, Examine Network Flows
-            if event.network:
-                dst_ip = event.network.dst_ip
-                dst_port = event.network.dst_port or 0
-                evidence_item["src_ip"] = event.network.src_ip
+            if event.source_ip and event.destination_ip:
+                dst_ip = event.destination_ip
+                dst_port = event.destination_port or 0
+                evidence_item["src_ip"] = event.source_ip
                 evidence_item["dst_ip"] = dst_ip
                 evidence_item["dst_port"] = dst_port
-                evidence_item["protocol"] = event.network.protocol
+                evidence_item["protocol"] = event.protocol
 
                 # Check Crown Jewel / Database access
                 if dst_port in CROWN_JEWEL_PORTS and event.network.direction == "internal":
@@ -167,7 +170,7 @@ class CorrelationEngine:
                     evidence_item["mitre"] = mitre_code
                     evidence_item["summary"] = f"Known offensive / penetration binary execution: {proc_name} ({mitre_code})"
 
-                elif event.event_type == EventType.NETWORK_CONNECTION:
+                elif str(event.event_type) in ("network_connection", "connection"):
                     r_port = event.endpoint.remote_port or 0
                     if r_port in LATERAL_PORTS:
                         stage = "lateral_movement"

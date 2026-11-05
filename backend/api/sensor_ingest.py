@@ -72,7 +72,7 @@ async def ingest_zeek_dns(payload: Union[Dict[str, Any], List[Dict[str, Any]]]):
         records = [payload] if isinstance(payload, dict) else payload
         published = 0
         for rec in records:
-            event = zeek_ingestor.parse_dns_record(rec)
+            event = zeek_adapter.transform(rec)
             if event:
                 await event_bus.publish(event)
                 published += 1
