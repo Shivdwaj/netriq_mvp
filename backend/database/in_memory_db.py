@@ -163,3 +163,4 @@ class InMemoryDatabase:
 
     async def list_collection_names(self):
         return list(self._collections.keys())
+
