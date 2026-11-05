@@ -156,3 +156,4 @@ class ZeekLogIngestor:
             return None
 
 zeek_ingestor = ZeekLogIngestor()
+

@@ -154,3 +154,4 @@ class SuricataEveIngestor:
             return None
 
 suricata_ingestor = SuricataEveIngestor()
+

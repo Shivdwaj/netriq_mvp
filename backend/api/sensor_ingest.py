@@ -6,8 +6,7 @@ from backend.auth.roles import Capabilities
 from backend.auth.permissions import require_permission
 from backend.utils.logger import get_logger
 from backend.pipeline import event_bus
-from backend.ingestors.suricata_ingestor import suricata_ingestor
-from backend.ingestors.zeek_ingestor import zeek_ingestor
+from backend.adapters import suricata_adapter, zeek_adapter
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/sensors", tags=["sensors"])
@@ -27,7 +26,7 @@ async def ingest_suricata_eve(payload: Union[Dict[str, Any], List[Dict[str, Any]
         records = [payload] if isinstance(payload, dict) else payload
         published = 0
         for rec in records:
-            event = suricata_ingestor.parse_eve_record(rec)
+            event = suricata_adapter.transform(rec)
             if event:
                 await event_bus.publish(event)
                 published += 1
@@ -50,7 +49,7 @@ async def ingest_zeek_conn(payload: Union[Dict[str, Any], List[Dict[str, Any]]])
         records = [payload] if isinstance(payload, dict) else payload
         published = 0
         for rec in records:
-            event = zeek_ingestor.parse_conn_record(rec)
+            event = zeek_adapter.transform(rec)
             if event:
                 await event_bus.publish(event)
                 published += 1
@@ -86,3 +85,4 @@ async def ingest_zeek_dns(payload: Union[Dict[str, Any], List[Dict[str, Any]]]):
     except Exception as e:
         logger.error(f"[SensorIngest API] Error ingesting Zeek DNS: {e}", exc_info=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to ingest Zeek DNS logs")
+

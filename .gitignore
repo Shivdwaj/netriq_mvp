@@ -83,7 +83,8 @@ Thumbs.db
 .agent/
 .agents/
 .gemini/
-adapters/
+/adapters/
+!backend/adapters/
 GSD-STYLE.md
 PROJECT_RULES.md
 model_capabilities.yaml
