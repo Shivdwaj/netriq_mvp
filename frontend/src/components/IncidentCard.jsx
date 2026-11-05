@@ -70,6 +70,20 @@ export const IncidentCard = ({ incident, onSelect, onOpenResponseDialog, onSelec
                   {incident.attack_chain.length} Attack Stages
                 </span>
               )}
+
+              {/* Incident Type */}
+              {incident.incident_type && (
+                <span className="text-[10px] font-mono uppercase px-2 py-0.5 rounded bg-[#3b2a27] text-[#c4956a] border border-[#6b4c45]">
+                  {incident.incident_type}
+                </span>
+              )}
+
+              {/* Assigned Analyst */}
+              {incident.assigned_to && (
+                <span className="text-[10px] font-sans px-2 py-0.5 rounded bg-[#3b2a27] text-[#d4bfb0] border border-[#6b4c45] flex items-center gap-1">
+                  <span className="text-[#cc8833]">●</span> {incident.assigned_to}
+                </span>
+              )}
             </div>
 
             {/* Main incident text: Warm White #f8f4e7 */}

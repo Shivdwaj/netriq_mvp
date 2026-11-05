@@ -162,9 +162,9 @@ export const Incidents = () => {
   const filteredIncidents = useMemo(() => {
     return incidents.filter((item) => {
       if (filterStatus !== 'ALL') {
-        const itemStatus = (item.status || 'active').toUpperCase();
-        if (filterStatus === 'ACTIVE' && itemStatus !== 'ACTIVE' && itemStatus !== 'OPEN') return false;
-        if (filterStatus !== 'ACTIVE' && itemStatus !== filterStatus) return false;
+        const itemStatus = (item.status || 'new').toUpperCase();
+        if (filterStatus === 'NEW' && itemStatus !== 'NEW' && itemStatus !== 'ACTIVE' && itemStatus !== 'OPEN') return false;
+        if (filterStatus !== 'NEW' && itemStatus !== filterStatus) return false;
       }
 
       if (filterSeverity !== 'ALL') {
@@ -185,13 +185,15 @@ export const Incidents = () => {
         if (!matchesId && !matchesCode && !matchesDesc && !matchesSrc && !matchesDst && !matchesAsset) return false;
       }
 
-
       return true;
     });
   }, [incidents, filterStatus, filterSeverity, searchQuery]);
 
   const activeCount = incidents.filter(
-    (i) => (i.status || 'active').toLowerCase() === 'active' || (i.status || '').toLowerCase() === 'open'
+    (i) => {
+      const s = (i.status || 'new').toLowerCase();
+      return s === 'new' || s === 'active' || s === 'investigating';
+    }
   ).length;
 
   return (
@@ -270,7 +272,7 @@ export const Incidents = () => {
           <div className="flex flex-wrap items-center gap-3 text-xs w-full md:w-auto justify-end font-sans">
             {/* Status Pills */}
             <div className="flex items-center gap-1 bg-[#101820] p-1 rounded-lg border border-[#2A3944]">
-              {['ALL', 'ACTIVE', 'INVESTIGATING', 'RESOLVED'].map((st) => (
+              {['ALL', 'NEW', 'INVESTIGATING', 'CONFIRMED', 'FALSE_POSITIVE', 'RESOLVED'].map((st) => (
                 <button
                   key={st}
                   onClick={() => setFilterStatus(st)}
@@ -280,7 +282,7 @@ export const Incidents = () => {
                       : 'text-[#9AA8B2] hover:text-[#E7ECEF]'
                   }`}
                 >
-                  {st}
+                  {st.replace('_', ' ')}
                 </button>
               ))}
             </div>

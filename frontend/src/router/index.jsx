@@ -9,6 +9,8 @@ import { LiveTrafficLayer1 } from '../pages/LiveTrafficLayer1';
 import { Monitoring } from '../pages/Monitoring';
 import { InternalNetworkLayer2 } from '../pages/InternalNetworkLayer2';
 import { ThreatDetection } from '../pages/ThreatDetection';
+import { Incidents } from '../pages/Incidents';
+import { Sensors } from '../pages/Sensors';
 import { DeviceQuarantine } from '../pages/DeviceQuarantine';
 import { Reports } from '../pages/Reports';
 import { Settings } from '../pages/Settings';
@@ -48,10 +50,14 @@ export const AppRouter = () => {
         <Route path="/internal-network" element={<InternalNetworkLayer2 />} />
         <Route path="/analytics" element={<InternalNetworkLayer2 />} />
 
-        {/* 04. Threat Detection - Alerts & Feature Explanations */}
+        {/* 04. Threat Detection & Incidents */}
         <Route path="/threats" element={<ThreatDetection />} />
         <Route path="/threat-detection" element={<ThreatDetection />} />
-        <Route path="/incidents" element={<ThreatDetection />} />
+        <Route path="/incidents" element={<Incidents />} />
+
+        {/* Central Management & Software Sensor Fleet */}
+        <Route path="/sensors" element={<Sensors />} />
+        <Route path="/management" element={<Sensors />} />
 
         {/* 05. Device Quarantine - Internal Isolation Controls & Audit Log */}
         <Route path="/quarantine" element={<DeviceQuarantine />} />

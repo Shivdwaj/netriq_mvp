@@ -10,6 +10,8 @@ import {
   ShieldAlert,
   FileText,
   Settings,
+  Radio,
+  FolderKanban,
 } from 'lucide-react';
 
 export const Sidebar = () => {
@@ -62,9 +64,14 @@ export const Sidebar = () => {
     {
       id: 'threat-detection',
       path: '/threats',
-      aliases: ['/incidents'],
       label: 'Threat Detection',
       icon: AlertTriangle,
+    },
+    {
+      id: 'incidents',
+      path: '/incidents',
+      label: 'Threat Incidents',
+      icon: FolderKanban,
     },
     {
       id: 'internal-network',
@@ -91,6 +98,13 @@ export const Sidebar = () => {
       path: '/reports',
       label: 'Reports',
       icon: FileText,
+    },
+    {
+      id: 'sensors',
+      path: '/sensors',
+      aliases: ['/management'],
+      label: 'Software Sensors',
+      icon: Radio,
     },
     {
       id: 'settings',
