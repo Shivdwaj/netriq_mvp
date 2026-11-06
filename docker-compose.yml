@@ -16,8 +16,11 @@ services:
       dockerfile: Dockerfile.backend
     container_name: netriq-backend
     restart: unless-stopped
-    ports:
-      - "8000:8000"
+    # Direct host port mapping REMOVED (Finding 3).
+    # Backend is placed behind the Nginx reverse proxy and strictly isolated within 'netriq-network'.
+    # Port 8000 is accessible only internally by the reverse proxy.
+    expose:
+      - "8000"
     environment:
       - MONGO_URI=${MONGO_URI:-mongodb://mongodb:27017/netriq_db}
       # JWT_SECRET_KEY loaded from environment/.env. Never hardcode secrets in Compose (Finding 1).
@@ -40,8 +43,12 @@ services:
       dockerfile: Dockerfile.frontend
     container_name: netriq-frontend
     restart: unless-stopped
+    # Reverse proxy entry points: HTTPS (443) and HTTP-to-HTTPS redirect (80)
     ports:
       - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/ssl:/etc/nginx/ssl:ro
     depends_on:
       - backend
     networks:

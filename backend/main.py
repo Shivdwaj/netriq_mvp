@@ -68,15 +68,11 @@ async def lifespan(app: FastAPI):
     except Exception as corr_err:
         logger.warning(f"[Startup] Could not subscribe correlation engine: {corr_err}")
 
-    # Auto-engage live hardware packet monitoring on Npcap physical NIC (skip during automated test runs)
-    if not os.environ.get("TESTING") and not os.environ.get("PYTEST_CURRENT_TEST"):
-        try:
-            from backend.services.monitoring_service import monitoring_service
-            from backend.auth.roles import Role
-            await monitoring_service.start(Role.ADMIN)
-            logger.info("[Startup] Live hardware packet monitoring pipeline engaged on physical NIC.")
-        except Exception as e:
-            logger.warning(f"[Startup] Could not auto-engage live monitor: {e}")
+    # Packet capture processes untrusted binary network wire data and must NOT start automatically
+    # during server boot (Finding 4 security requirement).
+    # Sensor activation is an explicit, administrator-controlled operation (POST /api/v1/monitoring/start)
+    # requiring Role.ADMIN authorization, interface validation, and immutable audit logging.
+    logger.info("[Startup] Packet monitoring sensor initialized in dormant IDLE state. Explicit administrator activation required.")
 
     yield
     # --- SHUTDOWN ---

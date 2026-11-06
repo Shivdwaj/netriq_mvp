@@ -11,11 +11,20 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/monitoring", tags=["monitoring"])
 
 
+class StartMonitoringReq(BaseModel):
+    interface: Optional[str] = None
+
+
 @router.post("/start", response_model=MonitorStatus, dependencies=[Depends(require_permission(Capabilities.MANAGE_SETTINGS))])
-async def start_monitoring(req: Request):
+async def start_monitoring(req: Request, body: Optional[StartMonitoringReq] = None):
     try:
-        await monitoring_service.start(get_request_role(req))
+        user_info = getattr(req.state, "user", {}) or {}
+        user_id = user_info.get("sub", "admin")
+        interface = body.interface if body else None
+        await monitoring_service.start(get_request_role(req), interface=interface, user_id=user_id)
         return MonitorStatus.model_validate(monitoring_service.get_status())
+    except ValueError as ve:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
     except Exception as e:
         logger.error(f"Failed to start monitoring: {e}", exc_info=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to start monitoring")
@@ -24,7 +33,9 @@ async def start_monitoring(req: Request):
 @router.post("/stop", response_model=MonitorStatus, dependencies=[Depends(require_permission(Capabilities.MANAGE_SETTINGS))])
 async def stop_monitoring(req: Request):
     try:
-        await monitoring_service.stop(get_request_role(req))
+        user_info = getattr(req.state, "user", {}) or {}
+        user_id = user_info.get("sub", "admin")
+        await monitoring_service.stop(get_request_role(req), user_id=user_id)
         return MonitorStatus.model_validate(monitoring_service.get_status())
     except Exception as e:
         logger.error(f"Failed to stop monitoring: {e}", exc_info=True)

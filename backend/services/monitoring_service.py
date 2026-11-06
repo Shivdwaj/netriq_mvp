@@ -328,16 +328,6 @@ class MonitoringService:
         self._last_subnet_sweep: float = 0.0
         self._sweep_in_progress: bool = False
         self._sweep_lock = threading.Lock()
-        
-        # Prime active subnet cache immediately in background thread (skip in tests)
-        import os
-        if not os.environ.get('TESTING') and not os.environ.get('PYTEST_CURRENT_TEST'):
-            try:
-                h_ip, gw_ip = self._get_network_endpoints()
-                self._sweep_in_progress = True
-                threading.Thread(target=self._run_subnet_sweep, args=(h_ip, gw_ip), daemon=True).start()
-            except Exception:
-                pass
 
     @property
     def lock(self) -> asyncio.Lock:
@@ -378,18 +368,48 @@ class MonitoringService:
             "metrics": op_metrics
         }
 
-    async def start(self, role: Role) -> bool:
-        """Starts the live monitoring pipeline. Idempotent."""
+    async def start(self, role: Role, interface: Optional[str] = None, user_id: str = "admin") -> bool:
+        """
+        Starts the live monitoring pipeline. Idempotent.
+        Enforces Role.ADMIN authorization, interface validation, and audit logging (Finding 4).
+        """
+        if role != Role.ADMIN:
+            from backend.auth.exceptions import InsufficientPermissionError
+            logger.critical(f"Unauthorized attempt to activate packet monitoring by role: {role}")
+            raise InsufficientPermissionError("Only administrators can activate network packet monitoring.")
+
         async with self.lock:
             if self._is_running:
                 logger.info("Monitoring already running.")
                 return True
 
             try:
+                if interface:
+                    from backend.live_monitor.interface_detector import InterfaceDetector
+                    available = [i.name for i in InterfaceDetector.get_available_interfaces()]
+                    if available and interface not in available and interface != "default":
+                        raise ValueError(f"Specified network interface '{interface}' not found. Available: {available}")
+                    live_monitor.interface = interface
+
                 await live_monitor.start()
                 self._is_running = True
                 self._start_time = time.time()
-                logger.info("Live Monitoring Pipeline Started.")
+                active_iface = getattr(live_monitor, "interface", "default")
+                logger.info(f"Live Monitoring Pipeline Started on interface: {active_iface}")
+
+                # Immutable audit log
+                try:
+                    from backend.database.collections import audit_logs_repo
+                    await audit_logs_repo.create({
+                        "action": "packet_monitoring_started",
+                        "user": user_id,
+                        "role": role.value if hasattr(role, "value") else str(role),
+                        "interface": active_iface,
+                        "timestamp": time.time(),
+                        "status": "success"
+                    })
+                except Exception as audit_err:
+                    logger.warning(f"[MonitoringService] Could not write audit log: {audit_err}")
 
                 event = MonitorStatusEvent(payload={"status": "started", **self.get_status()})
                 res = broadcaster.publish(event)
@@ -935,8 +955,16 @@ class MonitoringService:
             "devices": devices,
         }
 
-    async def stop(self, role: Role) -> bool:
-        """Stops the live monitoring pipeline. Idempotent."""
+    async def stop(self, role: Role, user_id: str = "admin") -> bool:
+        """
+        Stops the live monitoring pipeline. Idempotent.
+        Enforces Role.ADMIN authorization and audit logging.
+        """
+        if role != Role.ADMIN:
+            from backend.auth.exceptions import InsufficientPermissionError
+            logger.critical(f"Unauthorized attempt to stop packet monitoring by role: {role}")
+            raise InsufficientPermissionError("Only administrators can stop network packet monitoring.")
+
         async with self.lock:
             if not self._is_running:
                 logger.info("Monitoring already stopped.")
@@ -950,6 +978,19 @@ class MonitoringService:
                 self._is_running = False
                 self._start_time = 0.0
                 logger.info("Live Monitoring Pipeline Stopped.")
+
+                # Immutable audit log
+                try:
+                    from backend.database.collections import audit_logs_repo
+                    await audit_logs_repo.create({
+                        "action": "packet_monitoring_stopped",
+                        "user": user_id,
+                        "role": role.value if hasattr(role, "value") else str(role),
+                        "timestamp": time.time(),
+                        "status": "stopped"
+                    })
+                except Exception as audit_err:
+                    logger.warning(f"[MonitoringService] Could not write audit log: {audit_err}")
 
                 event = MonitorStatusEvent(payload={"status": "stopped", **self.get_status()})
                 res = broadcaster.publish(event)

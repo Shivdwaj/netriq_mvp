@@ -287,3 +287,89 @@ def test_docker_compose_and_jwt_security_guards():
     jwt_env = [e for e in env_vars if "JWT_SECRET_KEY" in e]
     assert len(jwt_env) > 0, "Backend service must declare JWT_SECRET_KEY in environment"
     assert "${JWT_SECRET_KEY" in jwt_env[0], "JWT_SECRET_KEY must reference environment variable ${JWT_SECRET_KEY}"
+
+
+@pytest.mark.asyncio
+async def test_reverse_proxy_and_backend_network_isolation():
+    """
+    Regression test for Finding 3:
+    - Backend is not directly exposed on host ports (no '8000:8000' in compose).
+    - Reverse proxy (Nginx) terminates HTTPS (443) and handles HTTP redirect (80).
+    - Nginx configuration specifies TLS 1.2/1.3 and security headers.
+    """
+    import yaml
+    with open("docker-compose.yml", "r", encoding="utf-8") as f:
+        compose_data = yaml.safe_load(f)
+
+    # 1. Backend must not publish host ports directly
+    backend_svc = compose_data.get("services", {}).get("backend", {})
+    assert "ports" not in backend_svc, "Backend container must NOT publish direct host ports (Finding 3)"
+    assert "8000" in backend_svc.get("expose", []), "Backend container should use 'expose: - 8000' for internal proxying"
+
+    # 2. Frontend Nginx reverse proxy publishes ports 80 and 443
+    frontend_svc = compose_data.get("services", {}).get("frontend", {})
+    ports = frontend_svc.get("ports", [])
+    assert any("80:80" in p for p in ports), "Reverse proxy must listen on port 80"
+    assert any("443:443" in p for p in ports), "Reverse proxy must listen on port 443 for HTTPS"
+
+    # 3. Nginx configuration verification
+    with open("docker/nginx.conf", "r", encoding="utf-8") as f:
+        nginx_conf = f.read()
+
+    assert "listen 443 ssl" in nginx_conf, "Nginx must have an SSL listener on port 443"
+    assert "ssl_protocols TLSv1.2 TLSv1.3" in nginx_conf, "Nginx must enforce modern TLS protocols (TLSv1.2 TLSv1.3)"
+    assert "Strict-Transport-Security" in nginx_conf, "Nginx must emit HSTS header"
+    assert "X-Frame-Options" in nginx_conf, "Nginx must emit X-Frame-Options header"
+    assert "return 301 https://$host$request_uri;" in nginx_conf, "Port 80 must redirect to HTTPS"
+
+
+@pytest.mark.asyncio
+async def test_explicit_admin_packet_monitoring_control():
+    """
+    Regression test for Finding 4:
+    - Server startup must not automatically activate live packet monitoring.
+    - Sensor activation is an explicit administrator operation requiring Role.ADMIN.
+    - Non-admin roles (e.g. Role.ANALYST) are rejected with InsufficientPermissionError.
+    - Activation and deactivation generate immutable audit logs.
+    """
+    from backend.services.monitoring_service import monitoring_service
+    from backend.auth.exceptions import InsufficientPermissionError
+    from backend.database.collections import audit_logs_repo
+
+    # 1. Ensure monitoring starts in IDLE / stopped state
+    if monitoring_service._is_running:
+        await monitoring_service.stop(Role.ADMIN)
+    assert monitoring_service.get_status()["is_running"] is False
+
+    # 2. Non-admin (Analyst) activation rejected
+    with pytest.raises(InsufficientPermissionError):
+        await monitoring_service.start(role=Role.ANALYST, user_id="analyst_test")
+
+    # 3. Explicit Admin activation allowed
+    started = await monitoring_service.start(role=Role.ADMIN, user_id="admin_test")
+    assert started is True
+    assert monitoring_service.get_status()["is_running"] is True
+
+    # 4. Verify audit log entry was created for activation
+    audit_logs = await audit_logs_repo.list(
+        filter_query={"action": "packet_monitoring_started", "user": "admin_test"},
+        limit=1
+    )
+    assert len(audit_logs) > 0
+    assert audit_logs[0]["role"] == "admin"
+
+    # 5. Non-admin (Analyst) stop rejected
+    with pytest.raises(InsufficientPermissionError):
+        await monitoring_service.stop(role=Role.ANALYST, user_id="analyst_test")
+
+    # 6. Admin stop allowed
+    stopped = await monitoring_service.stop(role=Role.ADMIN, user_id="admin_test")
+    assert stopped is True
+    assert monitoring_service.get_status()["is_running"] is False
+
+    # Verify audit log entry for stopping
+    stop_logs = await audit_logs_repo.list(
+        filter_query={"action": "packet_monitoring_stopped", "user": "admin_test"},
+        limit=1
+    )
+    assert len(stop_logs) > 0
