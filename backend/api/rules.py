@@ -200,7 +200,11 @@ async def get_detection_rules(req: Request):
     Returns full detection rule library:
     Suricata signatures, stateful NetrIQ heuristics, and behavioural baseline models.
     """
-    tenant_id = req.headers.get("X-Tenant-ID", "default")
+    user = getattr(req.state, "user", None)
+    if isinstance(user, dict) and user.get("tenant_id") and user.get("tenant_id") != "global":
+        tenant_id = user.get("tenant_id")
+    else:
+        tenant_id = req.headers.get("X-Tenant-ID", "default")
     version = time.strftime("%Y.%m.%d.01", time.gmtime())
 
     total_rules = (

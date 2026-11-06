@@ -16,12 +16,12 @@ class InMemoryCursor:
         self._limit_val = n
         return self
 
-    def sort(self, sort_by):
+    def sort(self, sort_by, direction=1):
         if not sort_by:
             return self
         if isinstance(sort_by, str):
             key = sort_by
-            reverse = False
+            reverse = direction < 0
             if key.startswith("-"):
                 key = key[1:]
                 reverse = True

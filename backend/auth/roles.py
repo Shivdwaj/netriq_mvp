@@ -4,6 +4,7 @@ class Role(str, Enum):
     ADMIN = "admin"
     ANALYST = "analyst"
     VIEWER = "viewer"
+    SENSOR = "sensor"
 
 class Capabilities(str, Enum):
     VIEW_SMART_SUMMARY = "VIEW_SMART_SUMMARY"
@@ -14,6 +15,8 @@ class Capabilities(str, Enum):
     MANAGE_SETTINGS = "MANAGE_SETTINGS"
     CREATE_ORGANIZATION = "CREATE_ORGANIZATION"
     VIEW_SYSTEM_METRICS = "VIEW_SYSTEM_METRICS"
+    INGEST_EVENTS = "INGEST_EVENTS"
+    VIEW_DETECTION_RULES = "VIEW_DETECTION_RULES"
 
 # The structured permission matrix matching the blueprint specifications.
 # Defines exactly what each role is authorized to do at the API layer.
@@ -26,19 +29,28 @@ PERMISSION_MATRIX = {
         Capabilities.MANAGE_USERS,
         Capabilities.MANAGE_SETTINGS,
         Capabilities.CREATE_ORGANIZATION,
-        Capabilities.VIEW_SYSTEM_METRICS
+        Capabilities.VIEW_SYSTEM_METRICS,
+        Capabilities.INGEST_EVENTS,
+        Capabilities.VIEW_DETECTION_RULES
     ],
     Role.ANALYST: [
         Capabilities.VIEW_SMART_SUMMARY,
         Capabilities.VIEW_RAW_LOGS,
         Capabilities.REVERSE_RESPONSE_ACTION,
         Capabilities.TRIGGER_QUARANTINE,
-        Capabilities.VIEW_SYSTEM_METRICS
+        Capabilities.VIEW_SYSTEM_METRICS,
+        Capabilities.INGEST_EVENTS,
+        Capabilities.VIEW_DETECTION_RULES
         # Analysts cannot manage users, settings, or provision new orgs
     ],
     Role.VIEWER: [
         Capabilities.VIEW_SMART_SUMMARY
         # Viewers can only access the high-level dashboard summaries
+    ],
+    Role.SENSOR: [
+        Capabilities.INGEST_EVENTS,
+        Capabilities.VIEW_DETECTION_RULES,
+        Capabilities.VIEW_SYSTEM_METRICS
     ]
 }
 

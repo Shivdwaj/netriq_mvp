@@ -141,7 +141,8 @@ class CentralManagementService:
             sensor_id=sensor_id,
             tenant_id=req.tenant_id,
             name=req.name,
-            api_key=plaintext_key
+            api_key=plaintext_key,
+            sensor_token=plaintext_key
         )
 
     async def authenticate_sensor(self, sensor_id: str, api_key: str) -> Optional[Dict[str, Any]]:

@@ -98,6 +98,7 @@ async def simulate_threat(req: ThreatSimulationRequest):
     Broadcasts LiveVerdictEvent and NewIncidentEvent across all connected WebSockets in real time.
     """
     import time
+    import uuid
     from backend.database.collections import threats_repo, incidents_repo
     from backend.websocket.broadcaster import broadcaster
     from backend.websocket.events import LiveVerdictEvent, NewIncidentEvent
@@ -192,8 +193,11 @@ async def simulate_threat(req: ThreatSimulationRequest):
         threat_doc["id"] = threat_id
 
         # Also create corresponding incident record
+        inc_id_str = f"inc-{uuid.uuid4().hex[:12]}"
         inc_doc = {
-            "status": "active",
+            "incident_id": inc_id_str,
+            "tenant_id": "default",
+            "status": "new",
             "severity": sev,
             "description": f"AI Engine Flagged: {pred} from {src}",
             "created_at": time.time(),

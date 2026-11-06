@@ -7,7 +7,12 @@ from backend.services.dashboard_service import dashboard_service
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
 @router.get("", response_model=DashboardSummary, dependencies=[Depends(require_permission(Capabilities.VIEW_SMART_SUMMARY))])
+@router.get("/overview", response_model=DashboardSummary, dependencies=[Depends(require_permission(Capabilities.VIEW_SMART_SUMMARY))])
 async def get_dashboard_summary(req: Request):
+    """
+    Returns high-level SOC dashboard overview statistics:
+    Threat summary, incident counts, network health, and active sensors.
+    """
     try:
         role = get_request_role(req)
         summary_dict = await dashboard_service.get_summary(role=role)

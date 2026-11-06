@@ -37,6 +37,8 @@ from backend.api.health import router as health_router
 from backend.api.behaviors import router as behaviors_router
 from backend.api.telemetry import router as telemetry_router
 from backend.api.sensor_ingest import router as sensor_ingest_router
+from backend.api.events import router as events_router
+from backend.api.threats import router as threats_router
 from backend.api.management import router as management_router
 from backend.api.rules import router as rules_router
 from backend.api.websocket import router as websocket_router, websocket_endpoint
@@ -142,12 +144,15 @@ app.include_router(health_router, prefix="/api/v1")
 app.include_router(behaviors_router, prefix="/api/v1")
 app.include_router(telemetry_router, prefix="/api/v1")
 app.include_router(sensor_ingest_router, prefix="/api/v1")
+app.include_router(events_router, prefix="/api/v1")
+app.include_router(threats_router, prefix="/api/v1")
 app.include_router(management_router, prefix="/api/v1")
 app.include_router(rules_router, prefix="/api/v1")
 app.include_router(health_router)  # Also expose root /health for docker/lb health checks
 app.include_router(websocket_router)  # WebSockets sit at root /ws
 app.websocket("/ws")(websocket_endpoint)
 app.websocket("/api/v1/ws")(websocket_endpoint)
+app.websocket("/api/v1/stream")(websocket_endpoint)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))

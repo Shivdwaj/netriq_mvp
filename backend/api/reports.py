@@ -1,4 +1,5 @@
 import time
+from typing import List
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import Response
 from backend.schemas.report import ReportGenerateReq, ReportMetadata
@@ -7,10 +8,24 @@ from backend.auth.permissions import require_permission
 from backend.services.report_service import report_service
 from backend.utils.exceptions import DocumentNotFoundError
 from backend.utils.logger import get_logger
+from backend.database.collections import reports_repo
 
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/reports", tags=["reports"])
+
+
+@router.get("", response_model=List[ReportMetadata], dependencies=[Depends(require_permission(Capabilities.VIEW_SMART_SUMMARY))])
+async def list_reports(request: Request, limit: int = 50, skip: int = 0):
+    """
+    Retrieves generated historical reports for the SOC dashboard and analysts.
+    """
+    try:
+        docs = await reports_repo.list(limit=limit, skip=skip, sort_by=[("created_at", -1)])
+        return [ReportMetadata(**doc) for doc in docs]
+    except Exception as e:
+        logger.error(f"Failed to list reports: {e}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to retrieve reports")
 
 
 @router.post("/generate", response_model=ReportMetadata, dependencies=[Depends(require_permission(Capabilities.VIEW_SMART_SUMMARY))])

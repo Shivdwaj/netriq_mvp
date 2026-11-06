@@ -40,7 +40,7 @@ class OrganisationItem(BaseModel):
 
 # --- Software Sensor Schemas ---
 class SensorRegistrationReq(BaseModel):
-    tenant_id: str
+    tenant_id: str = "default"
     name: str
     software_type: SensorSoftwareType
     software_version: str # e.g. "suricata-7.0.2", "zeek-6.0.3", "v1.2.0"
@@ -74,7 +74,8 @@ class SensorRegistrationResponse(BaseModel):
     tenant_id: str
     name: str
     api_key: str # Plaintext API key returned only once upon registration
-    auth_header_instruction: str = "Pass 'X-Sensor-Key: <api_key>' on all ingestion requests."
+    sensor_token: str = "" # Bearer token equivalent
+    auth_header_instruction: str = "Pass 'Authorization: Bearer <sensor-token>' or 'X-Sensor-Key: <api_key>' on all ingestion requests."
 
 class SensorHeartbeatReq(BaseModel):
     sensor_id: str
