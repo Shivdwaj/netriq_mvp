@@ -61,18 +61,46 @@ export const AppRouter = () => {
         <Route path="/internal-network" element={<InternalNetworkLayer2 />} />
         <Route path="/analytics" element={<InternalNetworkLayer2 />} />
 
-        {/* 06. Sensors - Monitoring status and health */}
-        <Route path="/sensors" element={<Sensors />} />
-        <Route path="/management" element={<Sensors />} />
+        {/* 06. Sensors - Central Daemon Software Management (Admin Only) */}
+        <Route
+          path="/sensors"
+          element={
+            <ProtectedRoute requiredRole="admin">
+              <Sensors />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/management"
+          element={
+            <ProtectedRoute requiredRole="admin">
+              <Sensors />
+            </ProtectedRoute>
+          }
+        />
 
-        {/* 07. Rules - Detection configuration */}
-        <Route path="/rules" element={<Rules />} />
+        {/* 07. Rules - Detection Configuration & Distribution (Admin Only) */}
+        <Route
+          path="/rules"
+          element={
+            <ProtectedRoute requiredRole="admin">
+              <Rules />
+            </ProtectedRoute>
+          }
+        />
 
-        {/* 08. Reports - Historical analysis */}
+        {/* 08. Reports - Historical Analysis (Analyst & Admin) */}
         <Route path="/reports" element={<Reports />} />
 
-        {/* 09. Settings - Users, roles and organisation settings */}
-        <Route path="/settings" element={<Settings />} />
+        {/* 09. Settings - System, Roles and Organisation Settings (Admin Only) */}
+        <Route
+          path="/settings"
+          element={
+            <ProtectedRoute requiredRole="admin">
+              <Settings />
+            </ProtectedRoute>
+          }
+        />
 
         {/* Quarantine & Response Controls */}
         <Route path="/quarantine" element={<DeviceQuarantine />} />
@@ -81,7 +109,14 @@ export const AppRouter = () => {
         <Route path="/reports-settings" element={<Navigate to="/reports" replace />} />
 
         {/* Secondary / Admin Routes */}
-        <Route path="/ai-performance" element={<AIPerformance />} />
+        <Route
+          path="/ai-performance"
+          element={
+            <ProtectedRoute requiredRole="admin">
+              <AIPerformance />
+            </ProtectedRoute>
+          }
+        />
         <Route path="/history" element={<History />} />
         <Route
           path="/users"

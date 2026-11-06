@@ -93,6 +93,13 @@ export const Sidebar = () => {
       desc: 'Devices, IPs & connections',
       icon: Network,
     },
+    {
+      id: 'reports',
+      path: '/reports',
+      label: 'Reports',
+      desc: 'Historical analysis',
+      icon: FileText,
+    },
   ];
 
   // Section 2: Administrator & Central Management (Sensors, system health, users & configurations)
@@ -111,13 +118,6 @@ export const Sidebar = () => {
       label: 'Rules',
       desc: 'Detection configuration',
       icon: Sliders,
-    },
-    {
-      id: 'reports',
-      path: '/reports',
-      label: 'Reports',
-      desc: 'Historical analysis',
-      icon: FileText,
     },
     {
       id: 'settings',
@@ -177,13 +177,15 @@ export const Sidebar = () => {
           </div>
         </div>
 
-        {/* SECTION 1: SECURITY ANALYST */}
+        {/* SECTION 1: INVESTIGATIONS / OPERATIONS (Visible to both Analyst & Admin) */}
         <div className="px-3 pt-4">
           <div className="px-2 pb-1.5 flex items-center justify-between">
             <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-cyan-400/80">
-              Security Analyst
+              {role === 'admin' ? 'Security Operations' : 'Investigations'}
             </span>
-            <span className="text-[9px] font-sans text-slate-400">Investigations</span>
+            <span className="text-[9px] font-sans text-slate-400">
+              {role === 'admin' ? 'Threat Telemetry' : 'SOC Operations'}
+            </span>
           </div>
 
           <div className="space-y-1">
@@ -218,46 +220,48 @@ export const Sidebar = () => {
           </div>
         </div>
 
-        {/* SECTION 2: ADMINISTRATOR */}
-        <div className="px-3 pt-5 pb-4">
-          <div className="px-2 pb-1.5 flex items-center justify-between">
-            <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-amber-400/80">
-              Administrator
-            </span>
-            <span className="text-[9px] font-sans text-slate-400">Sensors & Rules</span>
-          </div>
+        {/* SECTION 2: ADMINISTRATOR (Only visible to Admin role) */}
+        {role === 'admin' && (
+          <div className="px-3 pt-5 pb-4">
+            <div className="px-2 pb-1.5 flex items-center justify-between">
+              <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-amber-400/80">
+                Administration
+              </span>
+              <span className="text-[9px] font-sans text-slate-400">Sensors & Platform</span>
+            </div>
 
-          <div className="space-y-1">
-            {adminNavItems.map((item) => {
-              const active = isCurrentActive(item);
-              const Icon = item.icon;
+            <div className="space-y-1">
+              {adminNavItems.map((item) => {
+                const active = isCurrentActive(item);
+                const Icon = item.icon;
 
-              return (
-                <button
-                  key={item.id}
-                  onClick={() => navigate(item.path)}
-                  className={`w-full text-left px-3 py-2 rounded-xl flex items-center gap-3 transition-all cursor-pointer text-xs ${
-                    active
-                      ? 'bg-[#1872eb] text-white font-semibold shadow-md shadow-blue-600/30'
-                      : 'text-slate-300 hover:text-white hover:bg-white/[0.06]'
-                  }`}
-                >
-                  <Icon
-                    className={`w-4 h-4 shrink-0 transition-colors ${
-                      active ? 'text-white' : 'text-slate-400 group-hover:text-white'
+                return (
+                  <button
+                    key={item.id}
+                    onClick={() => navigate(item.path)}
+                    className={`w-full text-left px-3 py-2 rounded-xl flex items-center gap-3 transition-all cursor-pointer text-xs ${
+                      active
+                        ? 'bg-[#1872eb] text-white font-semibold shadow-md shadow-blue-600/30'
+                        : 'text-slate-300 hover:text-white hover:bg-white/[0.06]'
                     }`}
-                  />
-                  <div className="truncate">
-                    <div className="leading-tight font-medium text-xs">{item.label}</div>
-                    <div className={`text-[10px] truncate ${active ? 'text-blue-100' : 'text-slate-400'}`}>
-                      {item.desc}
+                  >
+                    <Icon
+                      className={`w-4 h-4 shrink-0 transition-colors ${
+                        active ? 'text-white' : 'text-slate-400 group-hover:text-white'
+                      }`}
+                    />
+                    <div className="truncate">
+                      <div className="leading-tight font-medium text-xs">{item.label}</div>
+                      <div className={`text-[10px] truncate ${active ? 'text-blue-100' : 'text-slate-400'}`}>
+                        {item.desc}
+                      </div>
                     </div>
-                  </div>
-                </button>
-              );
-            })}
+                  </button>
+                );
+              })}
+            </div>
           </div>
-        </div>
+        )}
       </div>
 
       {/* Bottom Status Card - Connected to live backend health */}

@@ -13,7 +13,7 @@ export const Navbar = () => {
       {/* Left: Welcome Greeting */}
       <div>
         <h1 className="text-2xl font-extrabold text-[#0a1c3d] tracking-tight">
-          Welcome, {user?.username ? user.username.charAt(0).toUpperCase() + user.username.slice(1) : 'Admin'}
+          Welcome, {user?.username ? user.username.charAt(0).toUpperCase() + user.username.slice(1) : (role === 'admin' ? 'Admin' : 'Analyst')}
         </h1>
       </div>
 
@@ -49,7 +49,7 @@ export const Navbar = () => {
               <User className="w-3.5 h-3.5 text-white" />
             </div>
             <span className="text-xs font-semibold text-[#0a1c3d]">
-              {user?.username ? user.username.charAt(0).toUpperCase() + user.username.slice(1) : 'Admin'}
+              {user?.username ? user.username.charAt(0).toUpperCase() + user.username.slice(1) : (role === 'admin' ? 'Admin' : 'Analyst')}
             </span>
             <ChevronDown className="w-3.5 h-3.5 text-[#687d9a]" />
           </button>
@@ -57,18 +57,20 @@ export const Navbar = () => {
           {dropdownOpen && (
             <div className="absolute right-0 mt-2 w-48 bg-white rounded-xl shadow-lg border border-[#e2e8f0] py-1.5 z-50">
               <div className="px-3.5 py-2 border-b border-[#f1f5f9]">
-                <div className="text-xs font-bold text-[#0a1c3d]">{user?.username || 'Admin'}</div>
-                <div className="text-[10px] text-[#64748b] truncate">{user?.email || 'admin@netriq.local'}</div>
+                <div className="text-xs font-bold text-[#0a1c3d]">{user?.username || (role === 'admin' ? 'Admin' : 'Analyst')}</div>
+                <div className="text-[10px] text-[#64748b] truncate">{user?.email || (role === 'admin' ? 'admin@netriq.local' : 'analyst@netriq.local')}</div>
               </div>
-              <button
-                onClick={() => {
-                  setDropdownOpen(false);
-                  navigate('/settings');
-                }}
-                className="w-full text-left px-3.5 py-2 text-xs text-[#334155] hover:bg-[#f8fafc] cursor-pointer"
-              >
-                Settings
-              </button>
+              {role === 'admin' && (
+                <button
+                  onClick={() => {
+                    setDropdownOpen(false);
+                    navigate('/settings');
+                  }}
+                  className="w-full text-left px-3.5 py-2 text-xs text-[#334155] hover:bg-[#f8fafc] cursor-pointer"
+                >
+                  Settings
+                </button>
+              )}
               <button
                 onClick={() => {
                   setDropdownOpen(false);
