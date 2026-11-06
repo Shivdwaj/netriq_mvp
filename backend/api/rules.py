@@ -13,7 +13,7 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/rules", tags=["rules"])
 
 # Default in-memory rule store (persisted across sessions via central management)
-DEFAULT_RULES = {
+DEFAULT_RULES: Dict[str, List[Dict[str, Any]]] = {
     "suricata_signatures": [
         {
             "id": "ET-2010935",
@@ -233,7 +233,8 @@ async def get_detection_rules(req: Request):
 async def update_detection_rule(rule_id: str, payload: RuleUpdateReq, req: Request):
     """Updates rule configuration or toggle status."""
     for category in ["suricata_signatures", "netriq_heuristics", "behaviour_baselines"]:
-        for rule in DEFAULT_RULES[category]:
+        rules_list: List[Dict[str, Any]] = DEFAULT_RULES.get(category, [])
+        for rule in rules_list:
             if rule["id"] == rule_id:
                 if payload.enabled is not None:
                     rule["enabled"] = payload.enabled
@@ -251,7 +252,11 @@ async def update_detection_rule(rule_id: str, payload: RuleUpdateReq, req: Reque
 @router.post("/distribute")
 async def distribute_ruleset_to_sensors(req: Request):
     """Compiles the latest rule manifest and dispatches rule updates to all registered software sensors."""
-    tenant_id = req.headers.get("X-Tenant-ID", "default")
+    user = getattr(req.state, "user", None)
+    if isinstance(user, dict) and user.get("tenant_id") and user.get("tenant_id") != "global":
+        tenant_id = user.get("tenant_id")
+    else:
+        tenant_id = req.headers.get("X-Tenant-ID", "default")
     manifest = await central_management_service.get_rule_manifest(tenant_id)
     sensors = await central_management_service.list_software_sensors(tenant_id)
     
