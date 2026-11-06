@@ -46,3 +46,8 @@ dependencies = [
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["backend*"]
+
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

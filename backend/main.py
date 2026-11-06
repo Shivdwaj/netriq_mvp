@@ -4,6 +4,7 @@ load_dotenv(Path(__file__).parent / ".env")  # Always load backend/.env regardle
 
 # NETRIQ Main Entrypoint (Real ML models & WebSockets active - Updated live pipeline)
 import os
+import uuid
 import uvicorn
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
@@ -102,7 +103,8 @@ app.add_middleware(RateLimitMiddleware)
 # --- Exception Handlers ---
 @app.exception_handler(NetriqException)
 async def netriq_exception_handler(request: Request, exc: NetriqException):
-    logger.error(f"Domain Error: {exc.__class__.__name__}: {str(exc)}")
+    correlation_id = getattr(request.state, "correlation_id", None) or uuid.uuid4().hex[:12]
+    logger.error(f"[Ref:{correlation_id}] Domain Error: {exc.__class__.__name__}: {str(exc)}")
     status_code = 400
     if exc.__class__.__name__ in ["InvalidCredentialsError", "TokenExpiredError", "InvalidTokenError"]:
         status_code = 401
@@ -110,15 +112,18 @@ async def netriq_exception_handler(request: Request, exc: NetriqException):
         status_code = 403
     return JSONResponse(
         status_code=status_code,
-        content={"error": exc.__class__.__name__, "message": str(exc), "detail": {}}
+        content={"error": exc.__class__.__name__, "message": str(exc), "correlation_id": correlation_id}
     )
 
 @app.exception_handler(Exception)
 async def general_exception_handler(request: Request, exc: Exception):
-    logger.error(f"Unhandled Server Error: {str(exc)}", exc_info=True)
+    correlation_id = getattr(request.state, "correlation_id", None) or uuid.uuid4().hex[:12]
+    # Detailed stack traces and internal exception messages are strictly logged on the server
+    # and NEVER leaked in HTTP response payloads (Finding 5)
+    logger.error(f"[Ref:{correlation_id}] Unhandled Server Error: {str(exc)}", exc_info=True)
     return JSONResponse(
         status_code=500,
-        content={"error": "InternalServerError", "message": "An unexpected error occurred.", "detail": str(exc)}
+        content={"error": "InternalServerError", "message": "An unexpected server error occurred.", "correlation_id": correlation_id}
     )
 
 # --- Routers ---

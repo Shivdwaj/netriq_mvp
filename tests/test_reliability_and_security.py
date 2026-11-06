@@ -373,3 +373,115 @@ async def test_explicit_admin_packet_monitoring_control():
         limit=1
     )
     assert len(stop_logs) > 0
+
+
+
+def test_dependencies_pinned_and_lockfile_exists():
+    """
+    Regression test for Finding 6:
+    - Every package in requirements.txt must be pinned with exact versions (==).
+    - Open-ended ranges (>=) are prohibited to ensure build determinism.
+    - requirements.lock must exist.
+    """
+    assert os.path.exists("requirements.txt"), "requirements.txt missing"
+    assert os.path.exists("requirements.lock"), "requirements.lock missing (Finding 6)"
+
+    with open("requirements.txt", "r", encoding="utf-8") as f:
+        lines = [l.strip() for l in f if l.strip() and not l.startswith("#")]
+
+    for line in lines:
+        assert ">=" not in line, f"Open-ended dependency found in requirements.txt: {line} (Finding 6)"
+        assert "==" in line, f"Dependency must be strictly pinned with '==': {line}"
+
+
+@pytest.mark.asyncio
+async def test_exception_masking_and_correlation_id():
+    """
+    Regression test for Finding 5:
+    - 500 responses must mask internal exception details (str(exc)).
+    - A traceable correlation_id must be returned to client and logged on server.
+    """
+    from httpx import AsyncClient, ASGITransport
+    from backend.main import app
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # Trigger an error path
+        resp = await client.get("/api/v1/nonexistent-route-404")
+        assert resp.status_code == 404
+
+    # Direct test of general_exception_handler
+    from starlette.requests import Request
+    from backend.main import general_exception_handler
+
+    mock_scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/test-error",
+        "headers": [],
+        "query_string": b"",
+        "server": ("test", 80)
+    }
+    mock_request = Request(mock_scope)
+    mock_exc = RuntimeError("Sensitive DB Connection String: mongodb://admin:secret@internal-db:27017")
+
+    res = await general_exception_handler(mock_request, mock_exc)
+    assert res.status_code == 500
+    import json
+    data = json.loads(res.body.decode("utf-8"))
+    assert data["error"] == "InternalServerError"
+    assert "correlation_id" in data
+    assert "Sensitive DB Connection String" not in json.dumps(data)
+    assert "detail" not in data or not data["detail"]
+
+
+@pytest.mark.asyncio
+async def test_sensor_ingestion_authentication_and_limits():
+    """
+    Regression test for Critical Finding: Unauthenticated sensor ingestion.
+    - Raw sensor ingestion endpoints (/suricata/eve, /zeek/conn, /zeek/dns) must require sensor credentials.
+    - Unauthenticated requests are rejected with HTTP 401.
+    - Payload size limits (> 1,000 items) are rejected with HTTP 413.
+    - Replay protection drops duplicate event hashes.
+    """
+    from httpx import AsyncClient, ASGITransport
+    from backend.main import app
+    from backend.auth.jwt_handler import create_access_token
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # 1. Unauthenticated ingestion rejected with 401
+        from backend.pipeline.schemas import get_utc_iso_now
+        suricata_payload = {
+            "timestamp": get_utc_iso_now(),
+            "event_type": "alert",
+            "src_ip": "192.168.1.100",
+            "dest_ip": "10.0.0.5",
+            "alert": {"signature": "ET SCAN Nmap", "category": "Scan"}
+        }
+        res_no_auth = await client.post("/api/v1/sensors/suricata/eve", json=suricata_payload)
+        assert res_no_auth.status_code == 401, f"Expected 401 Unauthorized without sensor credentials, got {res_no_auth.status_code}"
+
+        res_zeek_no_auth = await client.post("/api/v1/sensors/zeek/conn", json={"id.orig_h": "192.168.1.50"})
+        assert res_zeek_no_auth.status_code == 401, f"Expected 401 Unauthorized for Zeek, got {res_zeek_no_auth.status_code}"
+
+        # 2. Authenticated sensor submission succeeds
+        sensor_token = create_access_token("sensor-edge-01", "sensor", "org_demo")
+        headers = {"Authorization": f"Bearer {sensor_token}"}
+
+        res_auth = await client.post("/api/v1/sensors/suricata/eve", json=suricata_payload, headers=headers)
+        assert res_auth.status_code == 200
+        auth_data = res_auth.json()
+        assert auth_data["status"] == "success"
+        assert auth_data["events_ingested"] == 1
+
+        # 3. Replay Protection: immediate resubmission of duplicate record is dropped
+        res_replay = await client.post("/api/v1/sensors/suricata/eve", json=suricata_payload, headers=headers)
+        assert res_replay.status_code == 200
+        replay_data = res_replay.json()
+        assert replay_data["events_ingested"] == 0, "Replay duplicate record must be filtered out"
+
+        # 4. Oversized payload (> 1,000 records) rejected with 413
+        oversized_payload = [{"timestamp": "2026-11-06T12:00:00Z", "src_ip": f"10.0.0.{i % 250}"} for i in range(1005)]
+        res_oversized = await client.post("/api/v1/sensors/suricata/eve", json=oversized_payload, headers=headers)
+        assert res_oversized.status_code == 413, f"Expected 413 Payload Too Large, got {res_oversized.status_code}"

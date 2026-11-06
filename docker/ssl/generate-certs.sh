@@ -15,3 +15,4 @@ chmod 644 "$DIR/cert.pem"
 echo "Certificates successfully generated:"
 echo "  - $DIR/cert.pem"
 echo "  - $DIR/key.pem"
+

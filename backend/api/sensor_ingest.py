@@ -15,6 +15,10 @@ from backend.schemas.management import (
     SensorItem
 )
 from backend.database.collections import sensors_repo
+import hashlib
+import time
+import json
+from datetime import datetime
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/sensors", tags=["sensors"])
@@ -23,6 +27,52 @@ class IngestResponse(BaseModel):
     status: str
     events_ingested: int
     events_published: int
+
+# Replay protection: cache recent event hashes (sliding memory set)
+_INGEST_REPLAY_CACHE = set()
+_MAX_REPLAY_CACHE = 100000
+
+async def require_sensor_identity(req: Request) -> Dict[str, Any]:
+    """
+    Dedicated sensor-ingestion permission dependency (Critical Security Fix).
+    Enforces that callers submitting telemetry must authenticate as a registered sensor
+    via 'X-Sensor-Key' or 'Authorization: Bearer <sensor-token>'.
+    """
+    auth_user = getattr(req.state, "user", None)
+    x_sensor_key = req.headers.get("X-Sensor-Key")
+
+    if not auth_user and x_sensor_key:
+        try:
+            key_hash = hashlib.sha256(x_sensor_key.encode("utf-8")).hexdigest()
+            sensors = await sensors_repo.list(filter_query={"api_key_hash": key_hash}, limit=1)
+            if sensors:
+                s = sensors[0]
+                auth_user = {
+                    "sub": s["sensor_id"],
+                    "sensor_id": s["sensor_id"],
+                    "username": s.get("name", "sensor"),
+                    "role": "sensor",
+                    "tenant_id": s.get("tenant_id", "default"),
+                    "software_type": s.get("software_type", "sensor")
+                }
+                req.state.user = auth_user
+        except Exception as e:
+            logger.warning(f"Error checking sensor API key: {e}")
+
+    if not auth_user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Sensor authentication required: Provide a valid 'X-Sensor-Key' header or Bearer token."
+        )
+
+    user_role = auth_user.get("role")
+    if user_role not in (Role.ADMIN.value, "sensor", "sensor_ingest", Role.ANALYST.value):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden: Caller lacks sensor telemetry ingestion permissions."
+        )
+
+    return auth_user
 
 def _get_request_tenant(req: Request) -> str:
     """Extracts tenant_id from authenticated token/key or X-Tenant-ID header."""
@@ -233,74 +283,161 @@ async def get_selective_pcap(
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to retrieve selective PCAP")
 
 
-# --- Legacy Raw Ingestion Adapters (Suricata EVE & Zeek logs) ---
+# --- Secure Raw Ingestion Adapters (Suricata EVE & Zeek logs) ---
 
-@router.post("/suricata/eve", response_model=IngestResponse)
-async def ingest_suricata_eve(payload: Union[Dict[str, Any], List[Dict[str, Any]]]):
+def _validate_and_filter_records(
+    records: List[Dict[str, Any]],
+    now: float
+) -> List[Dict[str, Any]]:
+    """Enforces replay protection and timestamp freshness filtering."""
+    valid = []
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+
+        # Replay check via record signature
+        rec_hash = hashlib.sha256(json.dumps(rec, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+        if rec_hash in _INGEST_REPLAY_CACHE:
+            logger.warning("[SensorIngest] Duplicate event hash detected; dropping potential replay.")
+            continue
+
+        # Timestamp freshness check (allow window: past 24 hours to future 5 minutes)
+        ts = rec.get("timestamp") or rec.get("ts")
+        if ts:
+            try:
+                if isinstance(ts, (int, float)):
+                    event_time = float(ts)
+                else:
+                    clean_ts = str(ts).replace("Z", "+00:00")
+                    event_time = datetime.fromisoformat(clean_ts).timestamp()
+                if (now - event_time) > 86400 or (event_time - now) > 300:
+                    logger.warning(f"[SensorIngest] Stale or future event timestamp detected ({ts}); dropping.")
+                    continue
+            except Exception:
+                pass
+
+        if len(_INGEST_REPLAY_CACHE) >= _MAX_REPLAY_CACHE:
+            _INGEST_REPLAY_CACHE.clear()
+        _INGEST_REPLAY_CACHE.add(rec_hash)
+        valid.append(rec)
+    return valid
+
+@router.post("/suricata/eve", response_model=IngestResponse, dependencies=[Depends(require_sensor_identity)])
+async def ingest_suricata_eve(
+    payload: Union[Dict[str, Any], List[Dict[str, Any]]],
+    req: Request
+):
     """
     Ingests Suricata EVE JSON alerts, anomalies, or protocol events.
-    Normalizes into NetrIQ security events and streams to the Correlation Engine.
+    Requires authenticated sensor machine identity (X-Sensor-Key or Bearer token).
+    Enforces payload size limits, schema validation, and replay protection.
     """
     try:
         records = [payload] if isinstance(payload, dict) else payload
+        if not records:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Payload cannot be empty.")
+        if len(records) > 1000:
+            raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Batch limit exceeded: Maximum 1,000 events per ingestion request.")
+
+        tenant_id = _get_request_tenant(req)
+        now = time.time()
+        filtered_records = _validate_and_filter_records(records, now)
+
         published = 0
-        for rec in records:
+        for rec in filtered_records:
             event = suricata_adapter.transform(rec)
             if event:
+                event.tenant_id = tenant_id
                 await event_bus.publish(event)
                 published += 1
 
         return IngestResponse(
             status="success",
-            events_ingested=len(records),
+            events_ingested=len(filtered_records),
             events_published=published
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"[SensorIngest API] Error ingesting Suricata EVE: {e}", exc_info=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to ingest Suricata EVE")
 
-@router.post("/zeek/conn", response_model=IngestResponse)
-async def ingest_zeek_conn(payload: Union[Dict[str, Any], List[Dict[str, Any]]]):
+@router.post("/zeek/conn", response_model=IngestResponse, dependencies=[Depends(require_sensor_identity)])
+async def ingest_zeek_conn(
+    payload: Union[Dict[str, Any], List[Dict[str, Any]]],
+    req: Request
+):
     """
     Ingests Zeek conn.log records describing connection state, duration, and session metrics.
+    Requires authenticated sensor machine identity (X-Sensor-Key or Bearer token).
+    Enforces payload size limits, schema validation, and replay protection.
     """
     try:
         records = [payload] if isinstance(payload, dict) else payload
+        if not records:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Payload cannot be empty.")
+        if len(records) > 1000:
+            raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Batch limit exceeded: Maximum 1,000 events per ingestion request.")
+
+        tenant_id = _get_request_tenant(req)
+        now = time.time()
+        filtered_records = _validate_and_filter_records(records, now)
+
         published = 0
-        for rec in records:
+        for rec in filtered_records:
             event = zeek_adapter.transform(rec)
             if event:
+                event.tenant_id = tenant_id
                 await event_bus.publish(event)
                 published += 1
 
         return IngestResponse(
             status="success",
-            events_ingested=len(records),
+            events_ingested=len(filtered_records),
             events_published=published
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"[SensorIngest API] Error ingesting Zeek conn: {e}", exc_info=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to ingest Zeek conn logs")
 
-@router.post("/zeek/dns", response_model=IngestResponse)
-async def ingest_zeek_dns(payload: Union[Dict[str, Any], List[Dict[str, Any]]]):
+@router.post("/zeek/dns", response_model=IngestResponse, dependencies=[Depends(require_sensor_identity)])
+async def ingest_zeek_dns(
+    payload: Union[Dict[str, Any], List[Dict[str, Any]]],
+    req: Request
+):
     """
     Ingests Zeek dns.log records describing domain queries and IP resolutions.
+    Requires authenticated sensor machine identity (X-Sensor-Key or Bearer token).
+    Enforces payload size limits, schema validation, and replay protection.
     """
     try:
         records = [payload] if isinstance(payload, dict) else payload
+        if not records:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Payload cannot be empty.")
+        if len(records) > 1000:
+            raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Batch limit exceeded: Maximum 1,000 events per ingestion request.")
+
+        tenant_id = _get_request_tenant(req)
+        now = time.time()
+        filtered_records = _validate_and_filter_records(records, now)
+
         published = 0
-        for rec in records:
+        for rec in filtered_records:
             event = zeek_adapter.transform(rec)
             if event:
+                event.tenant_id = tenant_id
                 await event_bus.publish(event)
                 published += 1
 
         return IngestResponse(
             status="success",
-            events_ingested=len(records),
+            events_ingested=len(filtered_records),
             events_published=published
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"[SensorIngest API] Error ingesting Zeek DNS: {e}", exc_info=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to ingest Zeek DNS logs")

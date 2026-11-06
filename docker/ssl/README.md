@@ -27,3 +27,4 @@ In production:
    volumes:
      - ./docker/ssl:/etc/nginx/ssl:ro
    ```
+
