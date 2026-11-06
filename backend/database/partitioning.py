@@ -111,10 +111,8 @@ class RetentionPolicyManager:
                 cursor = db["evidence"].find(evi_query)
                 if hasattr(cursor, "to_list"):
                     expired_docs = await cursor.to_list(length=1000)
-                elif hasattr(cursor, "__iter__"):
-                    expired_docs = list(cursor)
                 else:
-                    expired_docs = await cursor
+                    expired_docs = list(cursor)
 
                 for doc in expired_docs:
                     fp = doc.get("file_path")
