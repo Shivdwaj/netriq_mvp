@@ -56,6 +56,60 @@ class IncidentService:
     - Multi-tenant organisation scoping
     """
 
+    async def create_from_response_action(
+        self,
+        target_ip: str,
+        prediction: Any,
+        action: Any,
+        success: bool,
+        tenant_id: str = "default"
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Creates an incident record triggered by an automated or guided response action.
+        Bridges AI decisions and analyst investigation queues.
+        """
+        try:
+            now = time.time()
+            now_iso = get_utc_iso_now()
+            risk_cat = getattr(prediction, "risk_category", None)
+            severity = getattr(risk_cat, "value", "medium").upper() if risk_cat else "MEDIUM"
+            act_val = getattr(action, "value", str(action))
+            model_name = getattr(prediction, "model_used", "AI Engine")
+            conf = getattr(prediction, "confidence", 85.0)
+
+            doc = {
+                "incident_code": f"INC-{int(now)}-{uuid.uuid4().hex[:4].upper()}",
+                "title": f"Response Action: {act_val.upper()} on {target_ip}",
+                "description": f"Triggered by AI Verdict ({model_name}) with confidence {conf:.1f}%. Action taken: {act_val} (Success: {success})",
+                "severity": severity,
+                "status": IncidentStatus.NEW.value,
+                "tenant_id": tenant_id,
+                "src_ip": target_ip,
+                "confidence": conf / 100.0 if conf > 1.0 else conf,
+                "affected_assets": [target_ip],
+                "response_action": act_val,
+                "action_executed": success,
+                "audit_history": [
+                    {
+                        "action": "incident_created",
+                        "user": "system:response_engine",
+                        "timestamp": now,
+                        "timestamp_iso": now_iso,
+                        "details": f"Auto-created from response action {act_val}"
+                    }
+                ],
+                "investigation_notes": [],
+                "created_at": now,
+                "updated_at": now
+            }
+            inc_id = await incidents_repo.create(doc)
+            doc["id"] = inc_id
+            logger.info(f"[IncidentService] Created incident record {doc['incident_code']} for target {target_ip} ({act_val})")
+            return doc
+        except Exception as e:
+            logger.error(f"[IncidentService] Failed to create incident from response action: {e}")
+            return None
+
     @staticmethod
     def _generate_incident_code(item_id: str, index: int = 0) -> str:
         try:

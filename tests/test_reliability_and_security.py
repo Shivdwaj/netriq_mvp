@@ -2,9 +2,11 @@ import asyncio
 import os
 import shutil
 import tempfile
+from unittest.mock import AsyncMock
 import pytest
 
 from backend.ai.contracts import Action, PredictionResult, RiskCategory
+from backend.auth.roles import Role
 from backend.response.response_engine import ResponseEngine
 from backend.services.settings_service import settings_service
 from backend.services.central_management_service import CentralManagementService
@@ -33,16 +35,18 @@ async def test_passive_detection_by_default():
     High-risk actions (RECOMMEND_BLOCK, QUARANTINE) are NOT executed automatically,
     but instead downgraded to guided analyst review.
     """
-    await settings_service.update_settings({"auto_quarantine": False})
+    await settings_service.update_settings(Role.ADMIN, {"auto_quarantine": False})
     
     engine = ResponseEngine()
+    engine.quarantine.quarantine_device = AsyncMock(return_value=True)
+    engine.firewall.block_ip = AsyncMock(return_value=True)
+
     prediction = PredictionResult(
-        is_attack=True,
+        verdict=True,
         confidence=95.0,
         risk_category=RiskCategory.HIGH,
         model_used="StructuredIntelligencePipeline",
-        recommended_action=Action.QUARANTINE,
-        features_analyzed={"reasons": ["Lateral movement detected"]}
+        latency_ms=1.2
     )
 
     # 1. Test QUARANTINE in Passive Mode
@@ -53,16 +57,15 @@ async def test_passive_detection_by_default():
     )
     assert success is True
     # The device should NOT be quarantined in passive mode
-    is_quarantined = await engine.quarantine.is_quarantined("192.168.1.100")
-    assert is_quarantined is False
+    assert engine.quarantine.quarantine_device.call_count == 0
 
     # 2. Test RECOMMEND_BLOCK in Passive Mode
     block_pred = PredictionResult(
-        is_attack=True,
+        verdict=True,
         confidence=90.0,
         risk_category=RiskCategory.HIGH,
         model_used="StructuredIntelligencePipeline",
-        recommended_action=Action.RECOMMEND_BLOCK
+        latency_ms=2.1
     )
     success_block = await engine.handle_verdict(
         prediction=block_pred,
@@ -71,22 +74,20 @@ async def test_passive_detection_by_default():
     )
     assert success_block is True
     # Firewall should NOT have blocked the IP
-    firewall_blocked = await engine.firewall.is_ip_blocked("203.0.113.50")
-    assert firewall_blocked is False
+    assert engine.firewall.block_ip.call_count == 0
 
     # 3. Test Active Mode (when explicitly enabled by admin)
-    await settings_service.update_settings({"auto_quarantine": True})
+    await settings_service.update_settings(Role.ADMIN, {"auto_quarantine": True})
     success_active = await engine.handle_verdict(
         prediction=prediction,
         action=Action.QUARANTINE,
         context={"src_ip": "192.168.1.105", "src_mac": "aa:bb:cc:dd:ee:ff"}
     )
     assert success_active is True
-    is_quarantined_active = await engine.quarantine.is_quarantined("192.168.1.105")
-    assert is_quarantined_active is True
+    assert engine.quarantine.quarantine_device.call_count == 1
 
     # Cleanup: restore default passive mode
-    await settings_service.update_settings({"auto_quarantine": False})
+    await settings_service.update_settings(Role.ADMIN, {"auto_quarantine": False})
 
 @pytest.mark.asyncio
 async def test_offline_local_event_queue_disk_persistence(temp_spool_dir):
@@ -251,4 +252,3 @@ def test_sensor_security_confinement():
     # Test privilege dropping & limits no-op safely on dev platforms
     assert drop_privileges() is True
     assert apply_resource_limits(max_memory_mb=1024) is True
-
