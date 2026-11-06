@@ -378,3 +378,4 @@ class AuditLog(BaseModel):
     details: Dict[str, Any] = Field(default_factory=dict)
     ip_address: Optional[str] = None
     status: str = "SUCCESS"  # SUCCESS, FAILED, DENIED
+
