@@ -169,3 +169,4 @@ class IntelligenceConfig(BaseModel):
 
 # Singleton default configuration, modifiable at runtime without restarting
 intelligence_config = IntelligenceConfig()
+

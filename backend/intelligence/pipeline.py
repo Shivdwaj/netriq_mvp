@@ -109,3 +109,4 @@ class StructuredIntelligencePipeline:
 
 # Global singleton pipeline instance
 intelligence_pipeline = StructuredIntelligencePipeline()
+

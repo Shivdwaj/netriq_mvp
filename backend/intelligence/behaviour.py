@@ -154,3 +154,4 @@ class BehaviourAnalyzer:
             behavioural_deviation_score=clamped_score,
             deviation_reasons=deviation_reasons
         )
+

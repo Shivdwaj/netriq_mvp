@@ -249,3 +249,4 @@ class ContextEnricher:
             asset_criticality_multiplier=crit_multiplier,
             summary=summary
         )
+

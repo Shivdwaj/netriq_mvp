@@ -238,3 +238,4 @@ class RiskEngine:
             dampening_discount_applied=dampening_discount,
             criticality_multiplier=crit_multiplier
         )
+
