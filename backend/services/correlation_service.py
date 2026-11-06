@@ -1,6 +1,6 @@
 import time
 import collections
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Set
 
 from backend.utils.logger import get_logger
 from backend.pipeline.schemas import NormalizedSecurityEvent, EventType
@@ -8,48 +8,24 @@ from backend.database.collections import incidents_repo
 from backend.services.notification_service import notification_service
 from backend.services.evidence_service import evidence_service
 from backend.schemas.entities import IncidentEventRole
+from backend.intelligence.config import IntelligenceConfig, intelligence_config
+from backend.intelligence.enricher import ContextEnricher, EnrichedEventContext, threat_intel_feed
+from backend.intelligence.behaviour import BehaviourAnalyzer, BehaviourAssessment
+from backend.intelligence.correlator import CorrelatedIncidentState
+from backend.intelligence.risk_engine import RiskEngine, RiskAssessmentResult
+from backend.intelligence.explainer import IncidentExplainer, IncidentExplanation
 
 logger = get_logger(__name__)
 
-# Port Classifications
-LATERAL_PORTS = {
-    445: "SMB / File Sharing",
-    135: "RPC Endpoint Mapper",
-    139: "NetBIOS Session Service",
-    3389: "RDP Remote Desktop",
-    22: "SSH Remote Shell",
-    5985: "WinRM HTTP",
-    5986: "WinRM HTTPS",
-    21: "FTP Control",
-    23: "Telnet"
-}
-
-CROWN_JEWEL_PORTS = {
-    1433: "MSSQL Database",
-    3306: "MySQL Database",
-    5432: "PostgreSQL Database",
-    27017: "MongoDB Cluster",
-    6379: "Redis In-Memory Store",
-    88: "Kerberos Key Distribution",
-    389: "LDAP Directory Service",
-    636: "LDAPS Secure Directory"
-}
-
-CRITICAL_TOOLS = {
-    "mimikatz.exe": "T1003 OS Credential Dumping",
-    "nmap.exe": "T1046 Network Service Discovery",
-    "responder.py": "T1557 LLMNR/NBT-NS Poisoning",
-    "cobaltstrike": "T1071 Command and Control Beacon",
-    "psexec.exe": "T1569 Lateral Tool Execution",
-    "hydra.exe": "T1110 Brute Force Password Cracker",
-    "wireshark.exe": "T1040 Network Sniffing",
-    "chisel.exe": "T1572 Protocol Tunneling / Proxy"
-}
+# Configurable dynamic mappings (zero hardcoded values; initialized from intelligence_config)
+LATERAL_PORTS: Dict[int, str] = intelligence_config.lateral_ports
+CROWN_JEWEL_PORTS: Dict[int, str] = intelligence_config.crown_jewel_ports
+CRITICAL_TOOLS: Dict[str, str] = intelligence_config.critical_tools
 
 class DeviceActivityTracker:
-    def __init__(self, key: str, window_seconds: float = 600.0):
+    def __init__(self, key: str, window_seconds: Optional[float] = None):
         self.key = key
-        self.window_seconds = window_seconds
+        self.window_seconds = window_seconds or intelligence_config.window_seconds
         self.events: collections.deque = collections.deque()
         self.scanned_ports: set = set()
         self.scanned_ips: set = set()
@@ -62,7 +38,7 @@ class DeviceActivityTracker:
 
     def prune(self, now: float):
         cutoff = now - self.window_seconds
-        while self.events and self.events[0]["timestamp"] < cutoff:
+        while self.events and self.events[0].get("timestamp", 0) < cutoff:
             self.events.popleft()
 
         # Recalculate working sets
@@ -75,20 +51,26 @@ class DeviceActivityTracker:
 
 class CorrelationEngine:
     """
-    Layer 4 Intelligence-Driven Intrusion Detection Engine.
-    Executes the 7-Step Sequence:
-    1. Detect port scan / anomalous activity
-    2. Identify source and destination (host, user, MAC, role)
-    3. Examine connection patterns (frequency, target services, flags)
-    4. Correlate related observations across sliding windows
-    5. Determine attack chain (MITRE ATT&CK progression)
-    6. Calculate contextual severity
-    7. Generate structured evidence and guided SOC response playbook
+    Structured NetrIQ Intelligence & Correlation Engine.
+    Executes the 6-Stage Structured Intelligence Pipeline:
+    1. Event interpretation (entity resolution & intent)
+    2. Context enrichment (asset topology & threat intelligence)
+    3. Behaviour analysis (adaptive baselines & anomaly detection)
+    4. Causal correlation (sliding windows & MITRE attack stages)
+    5. Risk assessment (independent severity/confidence with anti-double-counting)
+    6. Incident explanation (executive narrative & guided response playbook)
+
+    Zero hardcoded values: all configurations, weights, and thresholds are dynamic.
     """
 
-    def __init__(self, window_seconds: float = 600.0):
-        self.window_seconds = window_seconds
+    def __init__(self, window_seconds: Optional[float] = None, config: Optional[IntelligenceConfig] = None):
+        self.config = config or intelligence_config
+        self.window_seconds = window_seconds or self.config.window_seconds
         self._trackers: Dict[str, DeviceActivityTracker] = {}
+        self.enricher = ContextEnricher(self.config, threat_intel_feed)
+        self.behaviour_analyzer = BehaviourAnalyzer(self.config)
+        self.risk_engine = RiskEngine(self.config)
+        self.explainer = IncidentExplainer()
 
     def _get_tracker(self, key: str) -> DeviceActivityTracker:
         now = time.time()
@@ -179,24 +161,27 @@ class CorrelationEngine:
                 evidence_item["dst_port"] = dst_port
                 evidence_item["protocol"] = event.protocol
 
-                # Check Crown Jewel / Database access
-                if dst_port in CROWN_JEWEL_PORTS and event.network.direction == "internal":
-                    service_desc = CROWN_JEWEL_PORTS[dst_port]
+                # Check Crown Jewel / Database access (dynamic from config)
+                crown_jewels = self.config.crown_jewel_ports
+                lateral_ports = self.config.lateral_ports
+
+                if dst_port in crown_jewels and getattr(event.network, "direction", "internal") == "internal":
+                    service_desc = crown_jewels[dst_port]
                     stage = "crown_jewel_access"
                     evidence_item["stage"] = stage
                     evidence_item["mitre"] = "T1530 Data from Cloud/Internal Storage"
                     evidence_item["summary"] = f"Internal probe to high-value service ({service_desc}) on {dst_ip}:{dst_port}"
 
-                # Check Lateral Movement ports
-                elif dst_port in LATERAL_PORTS and event.network.direction == "internal":
-                    service_desc = LATERAL_PORTS[dst_port]
+                # Check Lateral Movement ports (dynamic from config)
+                elif dst_port in lateral_ports and getattr(event.network, "direction", "internal") == "internal":
+                    service_desc = lateral_ports[dst_port]
                     stage = "lateral_movement"
                     evidence_item["stage"] = stage
                     evidence_item["mitre"] = "T1021 Remote Services"
                     evidence_item["summary"] = f"Internal lateral movement probe to {service_desc} on {dst_ip}:{dst_port}"
 
                 # Check C2 / Outbound non-standard traffic
-                elif event.network.direction == "outbound" and dst_port not in (80, 443, 53, 123):
+                elif getattr(event.network, "direction", "internal") == "outbound" and dst_port not in (80, 443, 53, 123):
                     stage = "c2_exfil"
                     evidence_item["stage"] = stage
                     evidence_item["mitre"] = "T1071 Application Layer Protocol"
@@ -215,8 +200,9 @@ class CorrelationEngine:
                 evidence_item["process_name"] = proc_name
                 evidence_item["pid"] = event.endpoint.pid
 
-                if proc_name in CRITICAL_TOOLS or event.endpoint.is_suspicious:
-                    mitre_code = CRITICAL_TOOLS.get(proc_name, "T1059 Command Execution")
+                critical_tools = self.config.critical_tools
+                if proc_name in critical_tools or event.endpoint.is_suspicious:
+                    mitre_code = critical_tools.get(proc_name, "T1059 Command Execution")
                     stage = "malicious_process"
                     evidence_item["stage"] = stage
                     evidence_item["mitre"] = mitre_code
@@ -224,7 +210,7 @@ class CorrelationEngine:
 
                 elif event.event_type in ("network_connection", "connection"):
                     r_port = event.endpoint.remote_port or 0
-                    if r_port in LATERAL_PORTS:
+                    if r_port in self.config.lateral_ports:
                         stage = "lateral_movement"
                         evidence_item["stage"] = stage
                         evidence_item["mitre"] = "T1021 Remote Services"
@@ -241,12 +227,20 @@ class CorrelationEngine:
 
     async def _evaluate_and_synthesize_incident(self, tracker: DeviceActivityTracker, latest_event: NormalizedSecurityEvent):
         """
-        Step 4-7:
-        4. Correlates related observations across the device tracker.
-        5. Determines if activity is part of a larger multi-stage attack.
-        6. Calculates contextual severity.
-        7. Produces supporting evidence and guided investigation steps.
+        Executes the 6-Stage Intelligence Pipeline on the correlated tracker:
+        1. Context enrichment (asset topology & Threat Intel)
+        2. Behaviour analysis (rolling baselines & deviations)
+        3. Causal correlation (MITRE attack chain synthesis)
+        4. Dual-axis risk scoring with Anti-Double-Counting
+        5. Incident explanation (executive narrative & guided response playbook)
         """
+        # Stage 1 & 2: Context Enrichment
+        context = self.enricher.enrich(latest_event)
+
+        # Stage 3: Behaviour Analysis
+        behaviour = self.behaviour_analyzer.analyze(latest_event, context)
+
+        # Stage 4: Attack Chain Synthesis
         unique_ports = len(tracker.scanned_ports)
         unique_ips = len(tracker.scanned_ips)
         has_lateral = len(tracker.lateral_attempts) > 0
@@ -254,152 +248,86 @@ class CorrelationEngine:
         has_c2 = len(tracker.c2_attempts) > 0
         has_malicious_proc = len(tracker.suspicious_processes) > 0
 
-        # Step 4: Examine Reconnaissance threshold
-        is_port_scan = unique_ports >= 8 or unique_ips >= 5
+        # Port scan evaluation against configurable thresholds
+        is_port_scan = (
+            unique_ports >= self.config.port_scan_port_threshold or
+            unique_ips >= self.config.port_scan_ip_threshold
+        )
 
-        # Step 5: Attack Chain Synthesis (MITRE ATT&CK Mapping)
         attack_chain: List[str] = []
+        stages: List[str] = []
+
         if is_port_scan:
+            stages.append("reconnaissance")
             attack_chain.append(f"Stage 1: Discovery (T1046) - Probed {unique_ports} ports across {unique_ips} hosts")
         if has_malicious_proc:
+            stages.append("malicious_process")
             proc_names = list({p.get('process_name') for p in tracker.suspicious_processes if p.get('process_name')})
             attack_chain.append(f"Stage 2: Execution (T1059) - Offensive tooling launched ({', '.join(proc_names)})")
         if has_lateral:
+            stages.append("lateral_movement")
             attack_chain.append(f"Stage 3: Lateral Movement (T1021) - {len(tracker.lateral_attempts)} sensitive service probes")
         if has_crown_jewel:
+            stages.append("crown_jewel_access")
             attack_chain.append(f"Stage 4: Collection (T1530) - Targeted high-value internal database/auth assets")
         if has_c2:
+            stages.append("c2_exfil")
             attack_chain.append(f"Stage 5: Command & Control (T1071) - Anomalous outbound communication established")
 
-        # Must meet correlation criteria: 2+ stages OR critical offensive process OR port scan OR 3+ correlated observations
         obs_count = len(tracker.events)
-        should_trigger = len(attack_chain) >= 2 or has_malicious_proc or is_port_scan or obs_count >= 3
+        should_trigger = (
+            len(attack_chain) >= 2 or
+            has_malicious_proc or
+            is_port_scan or
+            obs_count >= self.config.min_observations_for_incident
+        )
         if not should_trigger:
             return
 
-        # Step 6A: Contextual Severity Calculation (Impact / Business Risk)
-        # Context Factors: stages count, crown jewel presence, user elevation
-        device = latest_event.device
-        is_elevated = bool(device and getattr(device, "logged_in_user", None) in ("root", "Administrator"))
-        
-        severity_score = 0
-        if has_crown_jewel:
-            severity_score += 40
-        if has_c2:
-            severity_score += 30
-        if has_lateral:
-            severity_score += 25
-        if has_malicious_proc:
-            severity_score += 25
-        if is_port_scan:
-            severity_score += 15
-        if is_elevated:
-            severity_score += 15
-
-        # Multi-stage amplifier
-        if len(attack_chain) >= 2:
-            severity_score += (len(attack_chain) - 1) * 10
-
-        if severity_score >= 65 or has_crown_jewel or len(attack_chain) >= 3:
-            severity = "CRITICAL"
-        elif severity_score >= 40:
-            severity = "HIGH"
-        elif severity_score >= 20:
-            severity = "MEDIUM"
-        else:
-            severity = "LOW"
-
-        # Step 6B: Evidentiary Confidence Calculation (Certainty / Proof of Occurrence)
-        # Independent of Severity: evaluating sensor agreement, repetition count, and TCP states
-        sources = {e.get("source") for e in tracker.events if e.get("source")}
-        engine_count = len(sources)
-
-        # Baseline confidence from observation volume
-        if obs_count >= 10:
-            conf_score = 0.75
-        elif obs_count >= 5:
-            conf_score = 0.65
-        elif obs_count >= 3:
-            conf_score = 0.55
-        else:
-            conf_score = 0.45
-
-        # Multi-engine corroboration bonus
-        if engine_count >= 3:
-            conf_score += 0.20 # Suricata + Zeek + NetrIQ Rule/Behaviour all agree
-        elif engine_count == 2:
-            conf_score += 0.12 # e.g. Zeek + Suricata agree
-
-        # Handshake / Exploit confirmation check
-        has_established_session = any(
-            e.get("details", {}).get("conn_state") == "SF" or e.get("conn_state") == "SF"
-            for e in tracker.events
+        corr_state = CorrelatedIncidentState(
+            tracker_key=tracker.key,
+            attack_chain=attack_chain,
+            stages_detected=stages,
+            is_port_scan=is_port_scan,
+            has_lateral=has_lateral,
+            has_crown_jewel=has_crown_jewel,
+            has_c2=has_c2,
+            has_malicious_proc=has_malicious_proc,
+            unique_ports_count=unique_ports,
+            unique_ips_count=unique_ips,
+            observation_count=obs_count,
+            should_synthesize_incident=should_trigger
         )
-        has_verified_signature = any(
-            e.get("source") in ("suricata", "detection_signature")
-            for e in tracker.events
+
+        # Stage 5: Dual-Axis Risk Assessment (with Anti-Double-Counting)
+        risk = self.risk_engine.assess_risk(
+            context=context,
+            behaviour=behaviour,
+            corr_state=corr_state,
+            raw_events=list(tracker.events)
         )
-        if has_established_session and has_verified_signature:
-            conf_score += 0.15
-        elif has_established_session:
-            conf_score += 0.08
 
-        # Clamp between 0.35 and 0.99
-        confidence = round(max(0.35, min(0.99, conf_score)), 2)
-
-        # Qualitative Confidence Label
-        if confidence >= 0.90:
-            confidence_label = "CONFIRMED"
-        elif confidence >= 0.75:
-            confidence_label = "PROBABLE"
-        elif confidence >= 0.60:
-            confidence_label = "SUSPECTED"
-        else:
-            confidence_label = "NEEDS_VALIDATION"
-
-        # Determine Incident Classification / Title
-        if len(attack_chain) >= 2:
-            incident_type = f"Correlated Attack Chain: {' -> '.join([s.split(' - ')[0] for s in attack_chain])}"
-        elif has_crown_jewel:
-            incident_type = "Crown Jewel Access Attempt"
-        elif has_lateral:
-            incident_type = "Lateral Movement Activity"
-        elif has_c2:
-            incident_type = "Suspected C2 Communication"
-        elif has_malicious_proc:
-            incident_type = "Malicious Process Execution"
-        elif is_port_scan or obs_count >= 3:
-            incident_type = "Possible reconnaissance"
-        else:
-            incident_type = "Suspicious Network Activity"
-
-        # Step 7: Formulate Recommended Investigation Steps (Actionable SOC Playbook)
-        hostname = (device.hostname if device else None) or "the host"
-        ip = (device.ip if device else None) or tracker.key
-        user = (device.logged_in_user if device else None) or "active session"
-
-        investigation_steps = [
-            f"1. Isolate {hostname} ({ip}) immediately using NetrIQ 1-Click Endpoint Quarantine to block lateral spread.",
-            f"2. Audit active processes on {hostname}; inspect parent-child execution trees for flagged binaries.",
-            f"3. Verify authentication logs for user '{user}' across internal directory and database servers.",
-            f"4. Block targeted destination ports on the perimeter firewall and review connection egress."
-        ]
-
-        if has_crown_jewel:
-            investigation_steps.insert(2, f"Targeted high-value internal asset detected: Check database access audit logs for unauthorized queries.")
-
-        title = f"{incident_type} ({severity})"
+        # Stage 6: Incident Explanation & Guided Playbook
+        explanation = self.explainer.explain(
+            context=context,
+            corr_state=corr_state,
+            risk=risk
+        )
 
         await self._upsert_incident(
             tracker=tracker,
             event=latest_event,
-            title=title,
-            incident_type=incident_type,
-            severity=severity,
-            confidence=confidence,
-            confidence_label=confidence_label,
+            title=explanation.title,
+            incident_type=explanation.incident_type,
+            severity=risk.severity_label,
+            confidence=risk.confidence_score,
+            confidence_label=risk.confidence_label,
             attack_chain=attack_chain,
-            investigation_steps=investigation_steps
+            investigation_steps=explanation.recommended_playbook,
+            description=explanation.executive_summary,
+            why_connected=explanation.why_connected,
+            risk_reasoning=explanation.risk_reasoning,
+            active_signals=[s.model_dump() for s in risk.active_signals]
         )
 
     async def _upsert_incident(
@@ -412,7 +340,11 @@ class CorrelationEngine:
         confidence: float,
         confidence_label: str,
         attack_chain: List[str],
-        investigation_steps: List[str]
+        investigation_steps: List[str],
+        description: Optional[str] = None,
+        why_connected: Optional[str] = None,
+        risk_reasoning: Optional[str] = None,
+        active_signals: Optional[List[Dict[str, Any]]] = None
     ):
         """Persists or updates an active Incident with full intelligence context in MongoDB."""
         now = time.time()
@@ -433,7 +365,10 @@ class CorrelationEngine:
                     "confidence": confidence,
                     "confidence_label": confidence_label,
                     "incident_type": incident_type,
-                    "description": title,
+                    "description": description or title,
+                    "why_connected": why_connected or "",
+                    "risk_reasoning": risk_reasoning or "",
+                    "active_signals": active_signals or [],
                     "attack_chain": attack_chain,
                     "evidence": evidence_slice,
                     "recommended_investigation_steps": investigation_steps
@@ -460,7 +395,10 @@ class CorrelationEngine:
             "incident_type": incident_type,
             "severity": severity,
             "title": title,
-            "description": title,
+            "description": description or title,
+            "why_connected": why_connected or "",
+            "risk_reasoning": risk_reasoning or "",
+            "active_signals": active_signals or [],
             "attack_chain": attack_chain,
             "created_at": now,
             "updated_at": now,
