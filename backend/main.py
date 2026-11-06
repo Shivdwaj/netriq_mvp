@@ -68,14 +68,15 @@ async def lifespan(app: FastAPI):
     except Exception as corr_err:
         logger.warning(f"[Startup] Could not subscribe correlation engine: {corr_err}")
 
-    # Auto-engage live hardware packet monitoring on Npcap physical NIC
-    try:
-        from backend.services.monitoring_service import monitoring_service
-        from backend.auth.roles import Role
-        await monitoring_service.start(Role.ADMIN)
-        logger.info("[Startup] Live hardware packet monitoring pipeline engaged on physical NIC.")
-    except Exception as e:
-        logger.warning(f"[Startup] Could not auto-engage live monitor: {e}")
+    # Auto-engage live hardware packet monitoring on Npcap physical NIC (skip during automated test runs)
+    if not os.environ.get("TESTING") and not os.environ.get("PYTEST_CURRENT_TEST"):
+        try:
+            from backend.services.monitoring_service import monitoring_service
+            from backend.auth.roles import Role
+            await monitoring_service.start(Role.ADMIN)
+            logger.info("[Startup] Live hardware packet monitoring pipeline engaged on physical NIC.")
+        except Exception as e:
+            logger.warning(f"[Startup] Could not auto-engage live monitor: {e}")
 
     yield
     # --- SHUTDOWN ---

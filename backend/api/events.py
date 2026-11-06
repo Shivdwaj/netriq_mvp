@@ -317,3 +317,4 @@ async def get_event_detail(event_id: str, req: Request):
     except Exception as e:
         logger.error(f"[EventsAPI] Failed to get event {event_id}: {e}", exc_info=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to retrieve event detail")
+

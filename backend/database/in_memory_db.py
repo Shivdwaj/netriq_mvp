@@ -92,7 +92,7 @@ class InMemoryCollection:
                 self.inserted_id = inserted_id
         return InsertResult(new_doc["_id"])
 
-    async def update_one(self, query: Dict[str, Any], update: Dict[str, Any]):
+    async def update_one(self, query: Dict[str, Any], update: Dict[str, Any], upsert: bool = False):
         matched = 0
         modified = 0
         for d in self._docs:
@@ -113,6 +113,17 @@ class InMemoryCollection:
                         d[ik] = d.get(ik, 0) + iv
                         modified += 1
                 break
+        if matched == 0 and upsert:
+            new_doc = dict(query)
+            if "_id" not in new_doc:
+                new_doc["_id"] = ObjectId()
+            if "$set" in update:
+                new_doc.update(update["$set"])
+            if "$setOnInsert" in update:
+                new_doc.update(update["$setOnInsert"])
+            self._docs.append(new_doc)
+            matched = 1
+            modified = 1
         class UpdateResult:
             def __init__(self, m, mod):
                 self.matched_count = m

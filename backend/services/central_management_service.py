@@ -308,5 +308,66 @@ class CentralManagementService:
             "fleet": fleet_matrix
         }
 
+    # --- 9. Selective Edge PCAP Retrieval ---
+    def __init__(self):
+        self._active_agents: Dict[str, Any] = {}
+
+    def register_active_agent(self, sensor_id: str, agent: Any):
+        """Registers a running edge sensor agent instance for selective PCAP querying."""
+        self._active_agents[sensor_id] = agent
+
+    def unregister_active_agent(self, sensor_id: str):
+        self._active_agents.pop(sensor_id, None)
+
+    async def retrieve_selective_pcap(
+        self,
+        sensor_id: str,
+        tenant_id: str,
+        src_ip: Optional[str] = None,
+        dst_ip: Optional[str] = None,
+        flow_id: Optional[str] = None,
+        start_time: Optional[float] = None,
+        end_time: Optional[float] = None,
+        max_packets: int = 50
+    ) -> Dict[str, Any]:
+        """
+        Selectively queries the local sensor edge PCAP ring buffer for specific investigation evidence.
+        Enforces tenant isolation and retrieves only packets matching the incident scope.
+        """
+        sensors = await sensors_repo.list(filter_query={"sensor_id": sensor_id}, limit=1)
+        if not sensors:
+            raise ValueError(f"Sensor '{sensor_id}' not found.")
+
+        sensor_doc = sensors[0]
+        if tenant_id != "global" and sensor_doc.get("tenant_id") != tenant_id:
+            raise PermissionError(f"Access denied to sensor '{sensor_id}' across tenant boundaries.")
+
+        agent = self._active_agents.get(sensor_id)
+        if agent and hasattr(agent, "pcap_buffer"):
+            raw_packets = agent.pcap_buffer.extract_selective_pcap(
+                src_ip=src_ip,
+                dst_ip=dst_ip,
+                flow_id=flow_id,
+                start_time=start_time,
+                end_time=end_time,
+                max_packets=max_packets
+            )
+        else:
+            raw_packets = []
+
+        return {
+            "sensor_id": sensor_id,
+            "tenant_id": sensor_doc.get("tenant_id", tenant_id),
+            "hostname": sensor_doc.get("hostname"),
+            "filter_applied": {
+                "src_ip": src_ip,
+                "dst_ip": dst_ip,
+                "flow_id": flow_id,
+                "max_packets": max_packets
+            },
+            "packet_count": len(raw_packets),
+            "packets": raw_packets
+        }
+
 central_management_service = CentralManagementService()
 

@@ -147,6 +147,47 @@ async def list_sensors(req: Request):
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to list sensors")
 
 
+@router.get("/{sensor_id}/pcap", dependencies=[Depends(require_permission(Capabilities.VIEW_SMART_SUMMARY))])
+async def get_selective_pcap(
+    sensor_id: str,
+    req: Request,
+    src_ip: Optional[str] = None,
+    dst_ip: Optional[str] = None,
+    flow_id: Optional[str] = None,
+    start_time: Optional[float] = None,
+    end_time: Optional[float] = None,
+    max_packets: int = 50
+):
+    """
+    On-Demand Selective PCAP Retrieval for SOC Analyst Investigations.
+    
+    Architectural Mandate:
+    Raw packet payloads stay local on the sensor PCAP ring buffer.
+    Only when an incident requires forensic packet drill-down does an authorized analyst
+    request the targeted slice for the specific flow and timeframe.
+    """
+    try:
+        tenant_id = _get_request_tenant(req)
+        pcap_data = await central_management_service.retrieve_selective_pcap(
+            sensor_id=sensor_id,
+            tenant_id=tenant_id,
+            src_ip=src_ip,
+            dst_ip=dst_ip,
+            flow_id=flow_id,
+            start_time=start_time,
+            end_time=end_time,
+            max_packets=max_packets
+        )
+        return pcap_data
+    except ValueError as ve:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(ve))
+    except PermissionError as pe:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(pe))
+    except Exception as e:
+        logger.error(f"[SensorIngest API] Failed to retrieve selective PCAP: {e}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to retrieve selective PCAP")
+
+
 # --- Legacy Raw Ingestion Adapters (Suricata EVE & Zeek logs) ---
 
 @router.post("/suricata/eve", response_model=IngestResponse)

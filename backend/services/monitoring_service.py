@@ -329,13 +329,15 @@ class MonitoringService:
         self._sweep_in_progress: bool = False
         self._sweep_lock = threading.Lock()
         
-        # Prime active subnet cache immediately in background thread
-        try:
-            h_ip, gw_ip = self._get_network_endpoints()
-            self._sweep_in_progress = True
-            threading.Thread(target=self._run_subnet_sweep, args=(h_ip, gw_ip), daemon=True).start()
-        except Exception:
-            pass
+        # Prime active subnet cache immediately in background thread (skip in tests)
+        import os
+        if not os.environ.get('TESTING') and not os.environ.get('PYTEST_CURRENT_TEST'):
+            try:
+                h_ip, gw_ip = self._get_network_endpoints()
+                self._sweep_in_progress = True
+                threading.Thread(target=self._run_subnet_sweep, args=(h_ip, gw_ip), daemon=True).start()
+            except Exception:
+                pass
 
     @property
     def lock(self) -> asyncio.Lock:

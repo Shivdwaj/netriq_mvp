@@ -52,3 +52,4 @@ async def list_threats(req: Request, query: LogQuery = Depends()):
     except Exception as e:
         logger.error(f"[ThreatsAPI] Failed to retrieve detection alerts: {e}", exc_info=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to retrieve threats")
+

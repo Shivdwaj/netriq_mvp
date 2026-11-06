@@ -2,7 +2,7 @@ import os
 import secrets
 import jwt
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from backend.utils.logger import get_logger
 from backend.auth.exceptions import TokenExpiredError, InvalidTokenError
 
@@ -27,10 +27,10 @@ JWT_REFRESH_EXPIRY_DAYS = int(os.getenv("JWT_REFRESH_EXPIRY_DAYS", "7"))
 JWT_ISSUER = os.getenv("JWT_ISSUER", "netriq-api")
 JWT_AUDIENCE = os.getenv("JWT_AUDIENCE", "netriq-client")
 
-def create_access_token(user_id: str, role: str) -> str:
+def create_access_token(user_id: str, role: str, tenant_id: Optional[str] = None) -> str:
     """
     Creates a short-lived access token.
-    Claims: sub, role, iat, exp, nbf, jti, iss, aud, type.
+    Claims: sub, role, iat, exp, nbf, jti, iss, aud, type, tenant_id.
     - jti (JWT ID): cryptographically random ID for future revocation support.
     - nbf (not-before): prevents token use before issuance.
     - iss/aud: issuer/audience for strict scope validation.
@@ -40,6 +40,7 @@ def create_access_token(user_id: str, role: str) -> str:
     to_encode = {
         "sub": user_id,
         "role": role,
+        "tenant_id": tenant_id or "default",
         "iat": now,
         "nbf": now,
         "exp": expire,

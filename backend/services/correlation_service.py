@@ -278,7 +278,7 @@ class CorrelationEngine:
         # Step 6A: Contextual Severity Calculation (Impact / Business Risk)
         # Context Factors: stages count, crown jewel presence, user elevation
         device = latest_event.device
-        is_elevated = device.logged_in_user in ("root", "Administrator")
+        is_elevated = bool(device and getattr(device, "logged_in_user", None) in ("root", "Administrator"))
         
         severity_score = 0
         if has_crown_jewel:
@@ -372,9 +372,9 @@ class CorrelationEngine:
             incident_type = "Suspicious Network Activity"
 
         # Step 7: Formulate Recommended Investigation Steps (Actionable SOC Playbook)
-        hostname = device.hostname or "the host"
-        ip = device.ip or tracker.key
-        user = device.logged_in_user or "active session"
+        hostname = (device.hostname if device else None) or "the host"
+        ip = (device.ip if device else None) or tracker.key
+        user = (device.logged_in_user if device else None) or "active session"
 
         investigation_steps = [
             f"1. Isolate {hostname} ({ip}) immediately using NetrIQ 1-Click Endpoint Quarantine to block lateral spread.",
@@ -415,10 +415,10 @@ class CorrelationEngine:
         """Persists or updates an active Incident with full intelligence context in MongoDB."""
         now = time.time()
         device = event.device
-        target_ip = device.ip or tracker.key
-        target_hostname = device.hostname or "Unknown Host"
-        target_mac = device.mac or "Unknown MAC"
-        target_user = device.logged_in_user or "Unknown User"
+        target_ip = (device.ip if device else None) or event.source_ip or tracker.key
+        target_hostname = (device.hostname if device else None) or "Unknown Host"
+        target_mac = (device.mac if device else None) or "Unknown MAC"
+        target_user = (device.logged_in_user if device else None) or "Unknown User"
 
         evidence_slice = list(tracker.events)[-20:]
 
@@ -443,7 +443,8 @@ class CorrelationEngine:
 
         # Create New Incident
         incident_doc = {
-            "status": "active",
+            "tenant_id": event.tenant_id or "default",
+            "status": "new",
             "incident_type": incident_type,
             "severity": severity,
             "title": title,
