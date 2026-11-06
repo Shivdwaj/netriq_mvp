@@ -76,7 +76,7 @@ class RetentionPolicyManager:
         health_cutoff = now - (sensor_health_retention_days * 86400)
         evidence_cutoff = now  # Evidence has explicit expires_at timestamp
 
-        tenant_filter = {} if tenant_id == "global" else {"tenant_id": tenant_id}
+        tenant_filter: Dict[str, Any] = {} if tenant_id == "global" else {"tenant_id": tenant_id}
         counts = {
             "network_events_pruned": 0,
             "sensor_health_pruned": 0,
@@ -85,7 +85,7 @@ class RetentionPolicyManager:
 
         try:
             # 1. Prune network_events
-            ev_query = dict(tenant_filter)
+            ev_query: Dict[str, Any] = dict(tenant_filter)
             ev_query["created_at"] = {"$lt": events_cutoff}
             for coll_name in ["network_events", "events"]:
                 try:
@@ -95,7 +95,7 @@ class RetentionPolicyManager:
                     pass
 
             # 2. Prune sensor_health
-            sh_query = dict(tenant_filter)
+            sh_query: Dict[str, Any] = dict(tenant_filter)
             sh_query["timestamp"] = {"$lt": health_cutoff}
             try:
                 res = await db["sensor_health"].delete_many(sh_query)
@@ -104,7 +104,7 @@ class RetentionPolicyManager:
                 pass
 
             # 3. Prune expired evidence (and remove file from disk)
-            evi_query = dict(tenant_filter)
+            evi_query: Dict[str, Any] = dict(tenant_filter)
             evi_query["expires_at"] = {"$lt": evidence_cutoff}
             try:
                 from backend.services.evidence_service import evidence_service

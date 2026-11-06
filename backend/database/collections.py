@@ -82,7 +82,7 @@ class BaseRepository:
             raise DocumentNotFoundError(f"Document with ID {doc_id} not found in {self.collection_name}")
         return True
 
-    async def list(self, filter_query: Optional[dict] = None, limit: int = 50, skip: int = 0, sort_by: Optional[list] = None) -> List[dict]:
+    async def list(self, filter_query: Optional[Dict[str, Any]] = None, limit: int = 50, skip: int = 0, sort_by: Optional[List[Any]] = None) -> List[Dict[str, Any]]:
         """Lists documents matching the filter."""
         query = filter_query or {}
         cursor = self.collection.find(query).skip(skip).limit(limit)
@@ -108,11 +108,11 @@ class BaseRepository:
     async def list_by_tenant(
         self,
         tenant_id: str,
-        filter_query: Optional[dict] = None,
+        filter_query: Optional[Dict[str, Any]] = None,
         limit: int = 50,
         skip: int = 0,
-        sort_by: Optional[list] = None
-    ) -> List[dict]:
+        sort_by: Optional[List[Any]] = None
+    ) -> List[Dict[str, Any]]:
         """Lists documents matching the filter, scoped strictly to the specified tenant."""
         query = dict(filter_query) if filter_query else {}
         if tenant_id and tenant_id != "global":
