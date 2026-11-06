@@ -7,6 +7,9 @@ from backend.auth.exceptions import AccountLockedError, InvalidCredentialsError
 
 class TestAuthIntegration(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        self.patcher_max = patch('backend.auth.auth_service.LOGIN_MAX_ATTEMPTS', 5)
+        self.patcher_max.start()
+
         self.patcher_repo = patch('backend.auth.auth_service.users_repo')
         self.mock_users_repo = self.patcher_repo.start()
         

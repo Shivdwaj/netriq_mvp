@@ -485,3 +485,290 @@ async def test_sensor_ingestion_authentication_and_limits():
         oversized_payload = [{"timestamp": "2026-11-06T12:00:00Z", "src_ip": f"10.0.0.{i % 250}"} for i in range(1005)]
         res_oversized = await client.post("/api/v1/sensors/suricata/eve", json=oversized_payload, headers=headers)
         assert res_oversized.status_code == 413, f"Expected 413 Payload Too Large, got {res_oversized.status_code}"
+
+
+@pytest.mark.asyncio
+async def test_admin_setup_endpoint_and_lockout():
+    """
+    Regression test for Finding 1 (Default Administrator Credentials):
+    - When an administrator exists, POST /api/v1/auth/setup is locked out with HTTP 403.
+    - Weak passwords during setup are rejected with HTTP 400.
+    - Initial setup creates the administrator and immediately closes setup mode.
+    """
+    from httpx import AsyncClient, ASGITransport
+    from backend.main import app
+    from backend.database.collections import users_repo
+    from unittest.mock import patch, AsyncMock
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # 1. Existing admin locks out /setup
+        with patch.object(users_repo, "list", new_callable=AsyncMock, return_value=[{"id": "existing_admin"}]):
+            res_locked = await client.post(
+                "/api/v1/auth/setup",
+                json={"email": "newadmin@netriq.local", "password": "SecurePassword123!"}
+            )
+            assert res_locked.status_code == 403
+            assert "setup mode is permanently disabled" in res_locked.json()["detail"].lower()
+
+        # 2. No admin present: Weak password rejected
+        with patch.object(users_repo, "list", new_callable=AsyncMock, return_value=[]):
+            res_weak = await client.post(
+                "/api/v1/auth/setup",
+                json={"email": "admin@netriq.local", "password": "short"}
+            )
+            assert res_weak.status_code == 400
+            assert "at least 12 characters" in res_weak.json()["detail"].lower()
+
+        # 3. No admin present: Valid setup succeeds
+        with patch.object(users_repo, "list", new_callable=AsyncMock, return_value=[]), \
+             patch.object(users_repo, "create", new_callable=AsyncMock, return_value="admin_u1"):
+            res_ok = await client.post(
+                "/api/v1/auth/setup",
+                json={"email": "initadmin@netriq.local", "password": "SuperSecureAdminPassword2026!"}
+            )
+            assert res_ok.status_code == 200
+            assert res_ok.json()["success"] is True
+            assert res_ok.json()["role"] == "admin"
+
+
+@pytest.mark.asyncio
+async def test_cors_strict_origins_and_no_wildcards():
+    """
+    Regression test for Finding 2 (Permissive CORS Configuration):
+    - Wildcard origins and regex matching are disallowed when credentials are True.
+    - Safe explicit trusted origins are loaded by default.
+    - ALLOWED_ORIGINS environment parsing sanitizes wildcards.
+    """
+    from backend.middleware.cors import get_allowed_origins, add_cors_middleware
+    from fastapi import FastAPI
+    from unittest.mock import patch
+
+    # 1. Default trusted origins when env var is empty
+    with patch.dict(os.environ, {"ALLOWED_ORIGINS": ""}, clear=False):
+        origins = get_allowed_origins()
+        assert "http://localhost:3000" in origins
+        assert "http://127.0.0.1:3000" in origins
+        assert "*" not in origins
+
+    # 2. Environment with wildcard strips '*' to protect credentialed cookies
+    with patch.dict(os.environ, {"ALLOWED_ORIGINS": "*,https://portal.netriq.io"}, clear=False):
+        sanitized = get_allowed_origins()
+        assert "*" not in sanitized
+        assert "https://portal.netriq.io" in sanitized
+
+    # 3. CORSMiddleware does NOT use allow_origin_regex
+    test_app = FastAPI()
+    add_cors_middleware(test_app)
+    cors_mw = [m for m in test_app.user_middleware if "CORSMiddleware" in str(m.cls)]
+    assert len(cors_mw) == 1
+    kwargs = cors_mw[0].kwargs
+    assert kwargs.get("allow_origin_regex") is None
+    assert kwargs.get("allow_credentials") is True
+    assert "*" not in kwargs.get("allow_origins", [])
+
+
+@pytest.mark.asyncio
+async def test_management_api_tenant_isolation_and_sensor_key_enforcement():
+    """
+    Regression test for Finding 3 (Multi-tenant isolation & Sensor management):
+    - POST /management/sensors/heartbeat without X-Sensor-Key returns 401.
+    - POST /management/sensors/heartbeat with invalid X-Sensor-Key returns 401.
+    - Non-admin user cannot access cross-tenant data via X-Tenant-ID spoofing.
+    - Admin user can query across tenants.
+    """
+    from httpx import AsyncClient, ASGITransport
+    from backend.main import app
+    from backend.api.management import _get_request_tenant
+    from starlette.requests import Request
+    from fastapi import HTTPException
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # 1. Heartbeat missing X-Sensor-Key rejected
+        hb_payload = {
+            "sensor_id": "sensor-suricata-01",
+            "cpu_usage_pct": 12.5,
+            "memory_usage_mb": 256.0,
+            "kernel_drops_count": 0,
+            "packets_processed": 1000,
+            "uptime_seconds": 3600.0
+        }
+        res_no_key = await client.post("/api/v1/management/sensors/heartbeat", json=hb_payload)
+        assert res_no_key.status_code == 401
+        assert "Missing required sensor authentication key" in res_no_key.json()["detail"]
+
+        # 2. Heartbeat with invalid X-Sensor-Key rejected
+        res_bad_key = await client.post(
+            "/api/v1/management/sensors/heartbeat",
+            json=hb_payload,
+            headers={"X-Sensor-Key": "invalid_bogus_key"}
+        )
+        assert res_bad_key.status_code == 401
+        assert "Invalid or unauthorized" in res_bad_key.json()["detail"]
+
+    # 3. Cross-tenant spoofing rejected for non-admin user
+    scope_user = {
+        "type": "http",
+        "method": "GET",
+        "path": "/management/sensors",
+        "headers": [(b"x-tenant-id", b"tenant_target")],
+        "query_string": b"",
+        "server": ("test", 80)
+    }
+    req_user = Request(scope_user)
+    req_user.state.user = {"sub": "user_123", "role": "analyst", "tenant_id": "tenant_assigned"}
+
+    with pytest.raises(HTTPException) as exc_info:
+        _get_request_tenant(req_user)
+    assert exc_info.value.status_code == 403
+    assert "Cross-tenant access prohibited" in exc_info.value.detail
+
+    # 4. Admin caller permitted to query specified tenant
+    scope_admin = {
+        "type": "http",
+        "method": "GET",
+        "path": "/management/sensors",
+        "headers": [(b"x-tenant-id", b"tenant_target")],
+        "query_string": b"",
+        "server": ("test", 80)
+    }
+    req_admin = Request(scope_admin)
+    req_admin.state.user = {"sub": "admin_root", "role": "admin", "tenant_id": "tenant_admin"}
+    assert _get_request_tenant(req_admin) == "tenant_target"
+
+
+@pytest.mark.asyncio
+async def test_rate_limiter_bounded_lru_and_bucket_partitioning():
+    """
+    Regression test for Finding 4 (Rate-Limiting Hardening):
+    - Dedicated rate buckets for Auth vs Ingest vs General.
+    - LRU eviction prunes old/stale entries without wiping the entire cache.
+    - Cache clear bypass vulnerability is eliminated.
+    """
+    import time
+    from backend.middleware.rate_limit import RateLimitMiddleware
+    from fastapi import FastAPI
+
+    test_app = FastAPI()
+    limiter = RateLimitMiddleware(test_app, max_requests=100, auth_max=15, ingest_max=1200)
+
+    # 1. Verify bucket partitioning
+    assert limiter._determine_bucket_and_limit("/api/v1/auth/login") == ("auth", 15, 60)
+    assert limiter._determine_bucket_and_limit("/api/v1/sensor/eve") == ("ingest", 1200, 60)
+    assert limiter._determine_bucket_and_limit("/api/v1/incidents") == ("general", 100, 60)
+
+    # 2. Test bounded LRU eviction (does NOT wipe cache)
+    now = time.time()
+    # Populate cache with dummy entries
+    for i in range(10050):
+        limiter._cache[f"key_{i}"] = {"count": 1, "reset_time": now + 60}
+
+    # Evict
+    limiter._evict_stale_or_oldest(now)
+    # Cache should be bounded and not wiped to 0
+    assert len(limiter._cache) <= 10000
+    assert len(limiter._cache) > 8000, "Cache must not be wiped entirely on threshold overflow"
+
+
+@pytest.mark.asyncio
+async def test_websocket_preauth_limits_and_max_payload():
+    """
+    Regression test for Finding 5 (WebSocket Security Hardening):
+    - Concurrency limit per IP for pre-auth connections.
+    - Maximum frame payload size (64 KB).
+    - Slot release upon authentication completion.
+    """
+    from backend.api.websocket import (
+        _acquire_preauth_slot,
+        _release_preauth_slot,
+        MAX_PREAUTH_PER_IP,
+        MAX_PAYLOAD_BYTES
+    )
+
+    test_ip = "198.51.100.42"
+
+    # 1. Frame size limit is 64KB
+    assert MAX_PAYLOAD_BYTES == 65536
+
+    # 2. Acquire up to max slots
+    for _ in range(MAX_PREAUTH_PER_IP):
+        assert await _acquire_preauth_slot(test_ip) is True
+
+    # 3. Next connection from same IP is rejected
+    assert await _acquire_preauth_slot(test_ip) is False
+
+    # 4. Releasing slot allows new connection
+    await _release_preauth_slot(test_ip)
+    assert await _acquire_preauth_slot(test_ip) is True
+
+    # Cleanup
+    for _ in range(MAX_PREAUTH_PER_IP):
+        await _release_preauth_slot(test_ip)
+
+
+@pytest.mark.asyncio
+async def test_response_engine_cidr_infrastructure_and_quarantine_quota():
+    """
+    Regression test for Finding 6 (Automated Response Engine Safeguards):
+    - CIDR-aware infrastructure bypass (loopback, broadcast, gateway, crown jewels).
+    - Crown jewel assets protected from automated quarantine.
+    - Sliding-window quarantine quota enforcement prevents cascading network DoS.
+    """
+    from backend.response.response_engine import ResponseEngine
+    from backend.ai.contracts import Action, PredictionResult, RiskCategory
+    from unittest.mock import AsyncMock, patch
+
+    engine = ResponseEngine()
+    engine.quarantine.quarantine_device = AsyncMock(return_value=True)
+
+    # 1. Loopback, broadcast, and standard gateway are protected
+    is_loopback, r1 = engine._is_protected_infrastructure("127.0.0.1", {})
+    assert is_loopback is True
+    assert "Loopback" in r1
+
+    is_bcast, r2 = engine._is_protected_infrastructure("255.255.255.255", {})
+    assert is_bcast is True
+
+    is_gw, r3 = engine._is_protected_infrastructure("192.168.1.1", {})
+    assert is_gw is True
+    assert "Gateway" in r3
+
+    # 2. Crown Jewel Asset Protection
+    context_jewel = {"crown_jewel_assets": ["10.50.1.10"]}
+    is_jewel, r4 = engine._is_protected_infrastructure("10.50.1.10", context_jewel)
+    assert is_jewel is True
+    assert "Crown Jewel" in r4
+
+    # 3. Normal IP is NOT protected
+    is_normal, _ = engine._is_protected_infrastructure("192.168.1.55", {})
+    assert is_normal is False
+
+    # 4. Quarantine Quota Limiting
+    pred = PredictionResult(
+        verdict=True,
+        confidence=98.0,
+        risk_category=RiskCategory.CRITICAL,
+        model_used="Test",
+        latency_ms=1.0
+    )
+
+    with patch.dict(os.environ, {"QUARANTINE_MAX_QUOTA_PER_HOUR": "2"}), \
+         patch("backend.services.settings_service.settings_service.get_settings", new_callable=AsyncMock, return_value={"auto_quarantine": True}):
+        # Mock ResponseEngine quota to 2
+        engine.max_quarantine_quota = 2
+        engine._recent_quarantines = {}
+
+        # 1st quarantine: Allowed
+        q1 = await engine.handle_verdict(pred, Action.QUARANTINE, {"src_ip": "192.168.1.51", "src_mac": "00:aa"})
+        assert q1 is True
+
+        # 2nd quarantine: Allowed
+        q2 = await engine.handle_verdict(pred, Action.QUARANTINE, {"src_ip": "192.168.1.52", "src_mac": "00:bb"})
+        assert q2 is True
+
+        # 3rd quarantine exceeds quota (2 max per hour): Suppressed/bypassed
+        q3 = await engine.handle_verdict(pred, Action.QUARANTINE, {"src_ip": "192.168.1.53", "src_mac": "00:cc"})
+        assert q3 is False
+        assert engine.quarantine.quarantine_device.call_count == 2
+

@@ -14,8 +14,11 @@ class SensorHealthStatus(str, Enum):
 class SensorSoftwareType(str, Enum):
     ALL_IN_ONE = "all_in_one"      # Full NetrIQ stack (Suricata + Zeek + Collector + Detector)
     SURICATA_ONLY = "suricata"     # Signature IDS engine only
+    SURICATA = "suricata"
     ZEEK_ONLY = "zeek"             # Protocol & metadata telemetry engine only
+    ZEEK = "zeek"
     EDGE_COLLECTOR = "collector"   # Lightweight collector / forwarder
+    COLLECTOR = "collector"
 
 # --- Customer Organisation Schemas ---
 class OrganisationCreateReq(BaseModel):

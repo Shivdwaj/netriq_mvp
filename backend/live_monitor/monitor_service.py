@@ -231,7 +231,9 @@ class MonitorService:
                         str(dst_ip).startswith("192.178.") or str(dst_ip).startswith("34.54.") or
                         str(dst_ip).startswith("35.")
                     )
-                    if is_benign_infra:
+                    # Only suppress background traffic if not an explicit high/critical actionable attack
+                    is_actionable_attack = is_anomaly and risk_cat in (RiskCategory.HIGH, RiskCategory.CRITICAL)
+                    if is_benign_infra and not is_actionable_attack:
                         is_anomaly = False
                         risk_cat = RiskCategory.LOW
                         result_dict["prediction"] = "BENIGN"

@@ -33,21 +33,35 @@ class AuthService:
     Note: Token extraction from HTTP headers is handled separately by middleware/auth.py.
     """
     async def seed_initial_users(self):
-        """Seeds default admin and analyst accounts if missing."""
+        """
+        Seeds initial administrator if configured via explicit environment variable.
+        Never uses hardcoded default passwords in production.
+        If NETRIQ_INIT_ADMIN_PASSWORD is provided, creates the initial admin.
+        In test mode (TESTING=true or ENV=test or NETRIQ_ALLOW_DEMO_SEED=true), seeds test accounts.
+        """
         try:
-            demo_users = [
-                ("admin@netriq.local", "admin", "AdminPassword123!", Role.ADMIN),
-                ("analyst@netriq.local", "analyst", "AnalystPassword123!", Role.ANALYST),
-            ]
-            for email, uname, pwd, r in demo_users:
-                existing = await users_repo.list({"$or": [{"email": email}, {"username": uname}]}, limit=1)
-                if not existing:
-                    logger.info(f"[AuthService] Seeding default account {uname} ({email})...")
-                    await self.register_user("system", email, pwd, r, username=uname)
-                else:
-                    u_doc = existing[0]
-                    if not u_doc.get("username"):
-                        await users_repo.update(u_doc["id"], {"username": uname})
+            admin_users = await users_repo.list({"role": Role.ADMIN.value}, limit=1)
+            if admin_users:
+                return  # Admin already initialized
+
+            init_admin_pwd = os.getenv("NETRIQ_INIT_ADMIN_PASSWORD")
+            init_admin_email = os.getenv("NETRIQ_INIT_ADMIN_EMAIL", "admin@netriq.local")
+            is_testing = os.getenv("TESTING", "").lower() == "true" or os.getenv("ENV", "").lower() == "test"
+            allow_demo = os.getenv("NETRIQ_ALLOW_DEMO_SEED", "").lower() in ("true", "1")
+
+            if init_admin_pwd:
+                logger.info(f"[AuthService] Initializing administrator account '{init_admin_email}' from environment.")
+                await self.register_user("system_init", init_admin_email, init_admin_pwd, Role.ADMIN, username="admin")
+            elif is_testing or allow_demo:
+                test_pwd = os.getenv("NETRIQ_TEST_ADMIN_PASSWORD", "AdminPassword123!")
+                analyst_pwd = os.getenv("NETRIQ_TEST_ANALYST_PASSWORD", "AnalystPassword123!")
+                logger.info("[AuthService] Seeding test accounts for automated test environment...")
+                await self.register_user("system", "admin@netriq.local", test_pwd, Role.ADMIN, username="admin")
+                existing_analyst = await users_repo.list({"email": "analyst@netriq.local"}, limit=1)
+                if not existing_analyst:
+                    await self.register_user("system", "analyst@netriq.local", analyst_pwd, Role.ANALYST, username="analyst")
+            else:
+                logger.info("[AuthService] No administrator exists and NETRIQ_INIT_ADMIN_PASSWORD not set. First-time setup required via POST /api/v1/auth/setup.")
         except Exception as e:
             logger.warning(f"[AuthService] User seed warning: {e}")
 

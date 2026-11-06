@@ -13,8 +13,10 @@ def setup_mock_db():
     mock_db = MagicMock()
     mock_col = MagicMock()
     mock_db.__getitem__.return_value = mock_col
+    old_db = getattr(DatabaseManager, "db", None)
     DatabaseManager.db = mock_db
-    return mock_col
+    yield mock_col
+    DatabaseManager.db = old_db
 
 @pytest.mark.asyncio
 async def test_incident_state_machine_and_audit_history(setup_mock_db):

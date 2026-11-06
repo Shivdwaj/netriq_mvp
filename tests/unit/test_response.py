@@ -29,6 +29,9 @@ class TestResponseEngine(unittest.IsolatedAsyncioTestCase):
         self.mock_log_cls = self.patcher_log.start()
         self.mock_logger = AsyncMock()
         self.mock_log_cls.return_value = self.mock_logger
+
+        self.patcher_settings = patch('backend.services.settings_service.settings_service.get_settings', new_callable=AsyncMock, return_value={"auto_quarantine": True})
+        self.patcher_settings.start()
         
         self.engine = ResponseEngine()
 

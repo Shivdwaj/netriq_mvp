@@ -1,10 +1,12 @@
+from typing import Optional
+from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from fastapi.responses import JSONResponse
 from backend.schemas.auth import LoginRequest, RefreshRequest, RegisterRequest, TokenResponse
 from backend.schemas.response import MessageResponse
 from backend.auth.auth_service import AuthService
 from backend.database.collections import users_repo
-from backend.auth.roles import Capabilities
+from backend.auth.roles import Capabilities, Role
 from backend.auth.permissions import require_permission
 from backend.auth.exceptions import (
     InvalidCredentialsError,
@@ -20,6 +22,47 @@ logger = get_logger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 auth_service = AuthService()
+
+class InitialSetupRequest(BaseModel):
+    email: str
+    password: str
+    username: Optional[str] = None
+
+@router.post("/setup")
+async def initial_setup(request: InitialSetupRequest):
+    """
+    First-time administrator setup endpoint.
+    Only accessible if no administrator account exists in the database.
+    Once initialized, this endpoint is permanently locked (HTTP 403 Forbidden).
+    """
+    admins = await users_repo.list({"role": Role.ADMIN.value}, limit=1)
+    if admins:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="System setup has already been completed. Setup mode is permanently disabled."
+        )
+
+    try:
+        user_id = await auth_service.register_user(
+            admin_user_id="initial_setup",
+            email=request.email,
+            raw_password=request.password,
+            role=Role.ADMIN,
+            username=request.username
+        )
+        logger.info(f"[AuthService] Initial administrator account '{request.email}' created successfully.")
+        return {
+            "success": True,
+            "message": "Initial administrator account created successfully. System setup completed.",
+            "user_id": user_id,
+            "email": request.email,
+            "role": "admin"
+        }
+    except (InvalidCredentialsError, WeakPasswordError) as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception as e:
+        logger.error(f"[AuthService] Initial setup failed: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to initialize administrator.")
 
 @router.post("/login", response_model=TokenResponse)
 async def login(request: LoginRequest):
