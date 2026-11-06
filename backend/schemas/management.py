@@ -1,28 +1,30 @@
 import uuid
+import os
 from enum import Enum
-from typing import Dict, Any, List, Optional
+from typing import List, Dict, Any, Optional
 from pydantic import BaseModel, Field
-from backend.pipeline.schemas import get_utc_iso_now
 
-class SensorSoftwareType(str, Enum):
-    SURICATA = "suricata"
-    ZEEK = "zeek"
-    NETRIQ_COLLECTOR = "netriq_collector"
-    ENDPOINT_AGENT = "endpoint_agent"
+from backend.pipeline.schemas import get_utc_iso_now
 
 class SensorHealthStatus(str, Enum):
     HEALTHY = "healthy"
     DEGRADED = "degraded"
     OFFLINE = "offline"
 
-# --- Organisation Schemas ---
+class SensorSoftwareType(str, Enum):
+    ALL_IN_ONE = "all_in_one"      # Full NetrIQ stack (Suricata + Zeek + Collector + Detector)
+    SURICATA_ONLY = "suricata"     # Signature IDS engine only
+    ZEEK_ONLY = "zeek"             # Protocol & metadata telemetry engine only
+    EDGE_COLLECTOR = "collector"   # Lightweight collector / forwarder
+
+# --- Customer Organisation Schemas ---
 class OrganisationCreateReq(BaseModel):
-    name: str
-    slug: str
+    name: str # e.g. "Acme Corporation"
+    slug: str # e.g. "acme-corp"
     admin_email: str
-    plan_tier: str = "enterprise"
-    internal_subnets: List[str] = Field(default_factory=lambda: ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"])
-    crown_jewel_assets: List[Dict[str, Any]] = Field(default_factory=list)
+    plan_tier: str = "enterprise" # starter, professional, enterprise
+    internal_subnets: List[str] = Field(default_factory=lambda: ["10.0.0.0/8", "192.168.0.0/16"])
+    crown_jewel_assets: List[str] = Field(default_factory=list) # Critical IP addresses
 
 class OrganisationItem(BaseModel):
     id: str
@@ -31,17 +33,17 @@ class OrganisationItem(BaseModel):
     slug: str
     admin_email: str
     plan_tier: str
-    internal_subnets: List[str] = Field(default_factory=list)
-    crown_jewel_assets: List[Dict[str, Any]] = Field(default_factory=list)
+    internal_subnets: List[str]
+    crown_jewel_assets: List[str]
     sensor_count: int = 0
     active_incidents_count: int = 0
     created_at: float
-    updated_at: Optional[float] = None
+    updated_at: float
 
-# --- Software Sensor Schemas ---
+# --- Software Sensor Management Schemas ---
 class SensorRegistrationReq(BaseModel):
-    tenant_id: str = "default"
-    name: str
+    tenant_id: str
+    name: str # Descriptive name e.g. "HQ Data Center Sensor 01"
     software_type: SensorSoftwareType
     software_version: str # e.g. "suricata-7.0.2", "zeek-6.0.3", "v1.2.0"
     hostname: str
@@ -102,4 +104,5 @@ class DetectionRuleManifest(BaseModel):
     suricata_rules: List[Dict[str, Any]] = Field(default_factory=list) # SID, content, action
     netriq_rules: List[Dict[str, Any]] = Field(default_factory=list)    # Thresholds, patterns
     active_whitelists: List[str] = Field(default_factory=list)
-
+    signature: Optional[str] = None
+    signature_alg: Optional[str] = "HMAC-SHA256"

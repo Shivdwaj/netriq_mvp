@@ -1,0 +1,64 @@
+# ==============================================================================
+# NetrIQ Suricata Hardened Configuration
+# Provides secure packet inspection with privilege separation and resource quotas
+# ==============================================================================
+
+%YAML 1.1
+---
+
+# 1. Threading and Execution Mode
+runmode: workers
+affinity:
+  management-cpu-set:
+    cpu: [ 0 ]
+  worker-cpu-set:
+    cpu: [ "1-3" ]
+    mode: "exclusive"
+
+# 2. Privilege Dropping after socket acquisition
+drop-privileges:
+  user: suricata
+  group: suricata
+
+# 3. Memory & Stream Reassembly Bounds
+stream:
+  memcap: 512mb
+  checksum-validation: yes
+  inline: no # NetrIQ v1 operates exclusively in passive detection mode
+  max-synack-queued: 1024
+  reassembly:
+    memcap: 256mb
+    depth: 1mb
+    toserver-chunk-size: 2560
+    toclient-chunk-size: 2560
+
+# 4. App-Layer Parser Restrictions
+app-layer:
+  protocols:
+    tls:
+      enabled: yes
+      detection-ports:
+        dp: 443
+    http:
+      enabled: yes
+      memcap: 128mb
+    dns:
+      global-memcap: 64mb
+      state-memcap: 1mb
+    smb:
+      enabled: yes
+
+# 5. Output Logging (EVE JSON format ingested by NetrIQ Collector)
+outputs:
+  - eve-log:
+      enabled: yes
+      filetype: regular
+      filename: /var/log/netriq/suricata-eve.json
+      types:
+        - alert:
+            payload: no
+            payload-buffer-size: 0
+            packet: no
+            metadata: yes
+        - flow
+

@@ -65,6 +65,24 @@ class ResponseEngine:
             await self.logger.log_action(action, target_ip, "Bypassed (Whitelisted)", True, context)
             return True
 
+        # Check Passive Detection Posture (auto_quarantine setting)
+        # NetrIQ defaults to passive detection (no automatic inline blocking) while detection
+        # accuracy and operational impact are validated by analysts.
+        auto_quarantine_enabled = False
+        try:
+            from backend.services.settings_service import settings_service
+            current_settings = await settings_service.get_settings()
+            auto_quarantine_enabled = current_settings.get("auto_quarantine", False)
+        except Exception:
+            auto_quarantine_enabled = False
+
+        if action in (Action.RECOMMEND_BLOCK, Action.QUARANTINE) and not auto_quarantine_enabled:
+            logger.info(f"[PassiveMode] Automated enforcement disabled ('auto_quarantine'=False). Downgrading {action.name} to guided analyst review for {target_ip}.")
+            outcome_msg = f"Passive Mode (Guided Review - {action.name})"
+            await self.logger.log_action(action, target_ip, outcome_msg, True, context)
+            asyncio.create_task(self._notify_incident_service(target_ip, prediction, action, False))
+            return True
+
         success = False
         outcome_msg = ""
         

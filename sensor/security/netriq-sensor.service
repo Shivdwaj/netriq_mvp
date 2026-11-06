@@ -1,0 +1,52 @@
+[Unit]
+Description=NetrIQ Network Security Sensor Daemon
+Documentation=https://docs.netriq.internal/sensor
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=netriq
+Group=netriq
+WorkingDirectory=/opt/netriq/sensor
+ExecStart=/opt/netriq/venv/bin/python -m sensor.agent
+Restart=on-failure
+RestartSec=5s
+
+# --- Security Confinement & Sandboxing ---
+# Allow binding to raw packet capture sockets without running as root
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_RAW
+
+# Filesystem Isolation
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ReadWritePaths=/var/spool/netriq /var/log/netriq
+
+# Network Family Restrictions
+RestrictAddressFamilies=AF_INET AF_INET6 AF_PACKET AF_UNIX
+
+# Memory and CPU Quotas (prevents packet decompression or regex bombs)
+MemoryMax=2G
+MemoryHigh=1800M
+CPUQuota=200%
+
+# Syscall Whitelisting via Seccomp
+SystemCallFilter=@system-service @network-io ~@privileged ~@mount ~@reboot ~@raw-io
+SystemCallArchitectures=native
+
+# Prevent gaining new privileges
+NoNewPrivileges=true
+
+# Standard Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=netriq-sensor
+
+[Install]
+WantedBy=multi-user.target
+

@@ -6,6 +6,7 @@ from typing import List, Optional
 class SensorConfig:
     """
     Configuration for NetrIQ Software Sensor Daemon running on customer VM/container.
+    All settings are fully configurable via environment variables (zero hardcoded values).
     """
     sensor_id: str = os.getenv("NETRIQ_SENSOR_ID", "sensor-edge-01")
     tenant_id: str = os.getenv("NETRIQ_TENANT_ID", "default")
@@ -22,13 +23,19 @@ class SensorConfig:
     pcap_retention_minutes: int = int(os.getenv("NETRIQ_PCAP_RETENTION_MIN", "60"))
     
     # Local Detection Rule Thresholds
-    port_scan_window_sec: float = 60.0
-    port_scan_port_threshold: int = 8
-    multi_host_ip_threshold: int = 5
+    port_scan_window_sec: float = float(os.getenv("NETRIQ_PORT_SCAN_WINDOW_SEC", "60.0"))
+    port_scan_port_threshold: int = int(os.getenv("NETRIQ_PORT_SCAN_PORT_THRESHOLD", "8"))
+    multi_host_ip_threshold: int = int(os.getenv("NETRIQ_MULTI_HOST_IP_THRESHOLD", "5"))
     
     # Cloud Batching & Ingestion
-    batch_size: int = 50
-    flush_interval_sec: float = 2.0
-    max_queue_size: int = 10000
-    heartbeat_interval_sec: float = 30.0
+    batch_size: int = int(os.getenv("NETRIQ_BATCH_SIZE", "50"))
+    flush_interval_sec: float = float(os.getenv("NETRIQ_FLUSH_INTERVAL_SEC", "2.0"))
+    max_queue_size: int = int(os.getenv("NETRIQ_MAX_QUEUE_SIZE", "10000"))
+    heartbeat_interval_sec: float = float(os.getenv("NETRIQ_HEARTBEAT_INTERVAL_SEC", "30.0"))
 
+    # Offline Operation & Local Event Spooling
+    disk_spool_path: Optional[str] = os.getenv("NETRIQ_SENSOR_SPOOL_PATH", None)
+    max_disk_spool_events: int = int(os.getenv("NETRIQ_MAX_SPOOL_EVENTS", "50000"))
+
+    # Security: Cryptographic Verification Key
+    signing_secret_key: Optional[str] = os.getenv("NETRIQ_SIGNING_KEY", None)

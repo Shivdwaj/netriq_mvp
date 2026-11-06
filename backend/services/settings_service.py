@@ -32,7 +32,7 @@ class SettingsService:
             "login_lockout_minutes": 15,
             "layer1_threshold": 0.85,
             "layer2_threshold": 0.78,
-            "auto_quarantine": True,
+            "auto_quarantine": False,  # Passive detection by default in v1 (no automated blocking)
         }
         merged.update(persisted)
         return merged

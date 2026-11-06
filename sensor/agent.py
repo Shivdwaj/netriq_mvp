@@ -9,6 +9,7 @@ from sensor.local_detector import LocalDetectionEngine
 from sensor.event_queue import LocalEventQueue
 from sensor.shipper import SecureCloudShipper
 from backend.pipeline.schemas import NormalizedSecurityEvent
+from backend.security.signatures import ManifestSigner
 from backend.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -23,8 +24,9 @@ class NetriqSensorAgent:
     3. Event Collection
     4. Normalisation to NetrIQ Common Event Format
     5. Local Detection Engine (sliding window rules)
-    6. Local Event Queue (buffer with retries)
+    6. Local Event Queue (buffer with retries & disk spooling)
     7. Secure Cloud Ingestion (HTTPS batch transmission)
+    8. Software Integrity: Cryptographic verification of distributed rule manifests
     """
     def __init__(self, config: Optional[SensorConfig] = None):
         self.config = config or SensorConfig()
@@ -43,7 +45,11 @@ class NetriqSensorAgent:
             port_scan_threshold=self.config.port_scan_port_threshold,
             host_sweep_threshold=self.config.multi_host_ip_threshold
         )
-        self.event_queue = LocalEventQueue(max_size=self.config.max_queue_size)
+        self.event_queue = LocalEventQueue(
+            max_size=self.config.max_queue_size,
+            disk_spool_path=self.config.disk_spool_path,
+            max_disk_size=self.config.max_disk_spool_events
+        )
         self.shipper = SecureCloudShipper(
             central_url=self.config.central_api_url,
             sensor_id=self.config.sensor_id,
@@ -68,7 +74,7 @@ class NetriqSensorAgent:
         zeek_state: str = "S0"
     ) -> NormalizedSecurityEvent:
         """
-        Step 1-5 End-to-End Pipeline:
+        Step 1-6 End-to-End Pipeline:
         1. Captures packet into Local PCAP Ring Buffer (NOT sent to cloud).
         2. Suricata / Zeek processes traffic.
         3. Event Collector generates structured record.
@@ -107,10 +113,32 @@ class NetriqSensorAgent:
                 f"for source {src_ip}: {local_alert['title']}"
             )
 
-        # Step 6: Enqueue into Local Event Queue
+        # Step 6: Enqueue into Local Event Queue (with persistence if configured)
         await self.event_queue.enqueue(event)
         self.total_events_processed += 1
         return event
+
+    def apply_rule_manifest(self, manifest_data: Dict[str, Any], secret_key: Optional[str] = None) -> bool:
+        """
+        Applies a signed DetectionRuleManifest from Central Management.
+        Verifies software integrity & cryptographic signature before updating local detection rules.
+        Rejects tampered manifests and prevents untrusted updates.
+        """
+        key = secret_key or self.config.signing_secret_key
+        is_valid = ManifestSigner.verify_manifest(manifest_data, key)
+        if not is_valid:
+            logger.warning("[SensorAgent] REJECTED rule manifest: Cryptographic signature verification failed or payload tampered.")
+            return False
+
+        logger.info(f"[SensorAgent] Rule manifest '{manifest_data.get('manifest_id')}' verified successfully. Applying updates...")
+        netriq_rules = manifest_data.get("netriq_rules", [])
+        for rule in netriq_rules:
+            if rule.get("type") == "threshold":
+                if "min_ports" in rule:
+                    self.local_detector.port_scan_threshold = int(rule["min_ports"])
+                if "window_sec" in rule:
+                    self.local_detector.window_seconds = float(rule["window_sec"])
+        return True
 
     async def flush_to_cloud(self) -> Dict[str, Any]:
         """Step 7: Ships queued batches to Central NetrIQ Platform via HTTPS."""
@@ -128,5 +156,6 @@ class NetriqSensorAgent:
         )
 
     async def close(self):
+        """Releases network and storage resources cleanly."""
         await self.shipper.close()
-
+        self.event_queue.close()

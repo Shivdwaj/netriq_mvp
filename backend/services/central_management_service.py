@@ -8,6 +8,7 @@ from typing import Dict, Any, List, Optional
 from backend.utils.logger import get_logger
 from backend.database.collections import organisations_repo, sensors_repo, rules_repo
 from backend.pipeline.schemas import get_utc_iso_now
+from backend.security.signatures import ManifestSigner
 from backend.schemas.management import (
     OrganisationCreateReq,
     OrganisationItem,
@@ -245,6 +246,9 @@ class CentralManagementService:
             ],
             active_whitelists=internal_subnets
         )
+        signed = ManifestSigner.sign_manifest(manifest)
+        manifest.signature = signed.get("signature")
+        manifest.signature_alg = signed.get("signature_alg", "HMAC-SHA256")
         return manifest
 
     # --- 6. Remote Configuration Management ---
