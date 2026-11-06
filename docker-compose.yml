@@ -3,8 +3,8 @@ services:
     image: mongo:7.0
     container_name: netriq-mongodb
     restart: unless-stopped
-    ports:
-      - "27017:27017"
+    # Public port exposure removed for security: MongoDB is isolated exclusively
+    # within the internal Docker network 'netriq-network' (Finding 2).
     volumes:
       - mongo_data:/data/db
     networks:
@@ -19,15 +19,16 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - MONGO_URI=mongodb://mongodb:27017/netriq_db
-      - JWT_SECRET_KEY=netriq_production_demo_secret_key_32_chars_min!
-      - JWT_ALGORITHM=HS256
-      - JWT_ACCESS_EXPIRY_MINUTES=1440
-      - JWT_REFRESH_EXPIRY_DAYS=7
-      - RATE_LIMIT_DEFAULT=120
-      - ANOMALY_DETECTOR_ENABLED=True
-      - ZERO_DAY_WEIGHT=0.8
-      - HIGH_ANOMALY_THRESHOLD=70.0
+      - MONGO_URI=${MONGO_URI:-mongodb://mongodb:27017/netriq_db}
+      # JWT_SECRET_KEY loaded from environment/.env. Never hardcode secrets in Compose (Finding 1).
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:?JWT_SECRET_KEY must be provided via environment or .env}
+      - JWT_ALGORITHM=${JWT_ALGORITHM:-HS256}
+      - JWT_ACCESS_EXPIRY_MINUTES=${JWT_ACCESS_EXPIRY_MINUTES:-1440}
+      - JWT_REFRESH_EXPIRY_DAYS=${JWT_REFRESH_EXPIRY_DAYS:-7}
+      - RATE_LIMIT_DEFAULT=${RATE_LIMIT_DEFAULT:-120}
+      - ANOMALY_DETECTOR_ENABLED=${ANOMALY_DETECTOR_ENABLED:-True}
+      - ZERO_DAY_WEIGHT=${ZERO_DAY_WEIGHT:-0.8}
+      - HIGH_ANOMALY_THRESHOLD=${HIGH_ANOMALY_THRESHOLD:-70.0}
     depends_on:
       - mongodb
     networks:

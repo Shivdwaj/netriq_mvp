@@ -8,16 +8,39 @@ from backend.auth.exceptions import TokenExpiredError, InvalidTokenError
 
 logger = get_logger(__name__)
 
-# Configuration (Ensure 32+ byte default key for HMAC-SHA256)
-_DEFAULT_JWT_KEY = "netriq_super_secret_jwt_key_32_bytes_min!!"
-JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", _DEFAULT_JWT_KEY)
-ENVIRONMENT = os.getenv("ENVIRONMENT", os.getenv("ENV", "development")).lower()
+# Known insecure fallback keys that must never be permitted in production
+_INSECURE_FALLBACK_KEYS = {
+    "netriq_super_secret_jwt_key_32_bytes_min!!",
+    "netriq_production_demo_secret_key_32_chars_min!",
+    "secret",
+    "changeme",
+    "admin"
+}
 
-if JWT_SECRET_KEY == _DEFAULT_JWT_KEY:
+ENVIRONMENT = os.getenv("ENVIRONMENT", os.getenv("ENV", "development")).lower()
+_raw_key = os.getenv("JWT_SECRET_KEY")
+
+if not _raw_key or _raw_key in _INSECURE_FALLBACK_KEYS:
     if ENVIRONMENT == "production":
-        raise RuntimeError("FATAL SECURITY ERROR: Default JWT_SECRET_KEY used in production environment. Application startup aborted.")
+        raise RuntimeError(
+            "FATAL SECURITY ERROR: JWT_SECRET_KEY is either missing or set to an insecure default value. "
+            "A cryptographically strong secret must be supplied via environment variable in production. "
+            "Startup aborted to prevent token forgery."
+        )
     else:
-        logger.warning("SECURITY WARNING: JWT_SECRET_KEY is using default fallback value. Set JWT_SECRET_KEY in environment variables for production security.")
+        if not _raw_key:
+            JWT_SECRET_KEY = secrets.token_hex(32)
+            logger.warning(
+                "SECURITY WARNING: JWT_SECRET_KEY not set. Generated ephemeral random secret for this session."
+            )
+        else:
+            logger.warning(
+                f"SECURITY WARNING: JWT_SECRET_KEY is using a known demo/test key ('{_raw_key[:8]}...'). "
+                "Set a secure JWT_SECRET_KEY in production."
+            )
+            JWT_SECRET_KEY = _raw_key
+else:
+    JWT_SECRET_KEY = _raw_key
 
 JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 JWT_ACCESS_EXPIRY_MINUTES = int(os.getenv("JWT_ACCESS_EXPIRY_MINUTES", "1440"))  # 24 hours

@@ -252,3 +252,38 @@ def test_sensor_security_confinement():
     # Test privilege dropping & limits no-op safely on dev platforms
     assert drop_privileges() is True
     assert apply_resource_limits(max_memory_mb=1024) is True
+
+
+def test_docker_compose_and_jwt_security_guards():
+    """
+    Regression test for Critical Security Findings:
+    - Finding 1: No hardcoded JWT secret in docker-compose.yml (uses env var).
+    - Finding 2: MongoDB container does not expose 27017 to host interfaces.
+    """
+    import yaml
+    compose_path = "docker-compose.yml"
+    assert os.path.exists(compose_path), "docker-compose.yml missing"
+    
+    with open(compose_path, "r", encoding="utf-8") as f:
+        compose_text = f.read()
+        compose_data = yaml.safe_load(compose_text)
+
+    # 1. Verify MongoDB has no public port mapping
+    mongo_svc = compose_data.get("services", {}).get("mongodb", {})
+    assert "ports" not in mongo_svc, "MongoDB container must NOT publish ports to host interfaces (Finding 2)"
+
+    # 2. Verify no hardcoded secrets in docker-compose.yml
+    insecure_keys = [
+        "netriq_production_demo_secret_key_32_chars_min!",
+        "netriq_super_secret_jwt_key_32_bytes_min!!",
+        "JWT_SECRET_KEY=secret"
+    ]
+    for key in insecure_keys:
+        assert key not in compose_text, f"Hardcoded secret '{key}' found in docker-compose.yml (Finding 1)"
+
+    # 3. Verify backend service requires JWT_SECRET_KEY from environment
+    backend_svc = compose_data.get("services", {}).get("backend", {})
+    env_vars = backend_svc.get("environment", [])
+    jwt_env = [e for e in env_vars if "JWT_SECRET_KEY" in e]
+    assert len(jwt_env) > 0, "Backend service must declare JWT_SECRET_KEY in environment"
+    assert "${JWT_SECRET_KEY" in jwt_env[0], "JWT_SECRET_KEY must reference environment variable ${JWT_SECRET_KEY}"
