@@ -11,6 +11,7 @@ import { InternalNetworkLayer2 } from '../pages/InternalNetworkLayer2';
 import { ThreatDetection } from '../pages/ThreatDetection';
 import { Incidents } from '../pages/Incidents';
 import { Sensors } from '../pages/Sensors';
+import { Rules } from '../pages/Rules';
 import { DeviceQuarantine } from '../pages/DeviceQuarantine';
 import { Reports } from '../pages/Reports';
 import { Settings } from '../pages/Settings';
@@ -38,35 +39,43 @@ export const AppRouter = () => {
           </ProtectedRoute>
         }
       >
-        {/* 01. Dashboard - Main SOC Overview */}
+        {/* 01. Overview - Threat summary and network health */}
+        <Route path="/overview" element={<Dashboard />} />
         <Route path="/dashboard" element={<Dashboard />} />
 
-        {/* 02. Live Traffic - External (Pre-Firewall Ingress) */}
+        {/* 02. Live Events - Recent network activity */}
+        <Route path="/live-events" element={<LiveTrafficLayer1 />} />
         <Route path="/traffic-layer1" element={<LiveTrafficLayer1 />} />
         <Route path="/monitoring" element={<Monitoring />} />
 
-        {/* 03. Internal Network - Internal (Topology & Lateral Movement via React Flow) */}
+        {/* 03. Threats - Detection alerts and classifications */}
+        <Route path="/threats" element={<ThreatDetection />} />
+        <Route path="/threat-detection" element={<ThreatDetection />} />
+
+        {/* 04. Incidents - Correlated security investigations */}
+        <Route path="/incidents" element={<Incidents />} />
+
+        {/* 05. Network - Devices, IPs and connections */}
+        <Route path="/network" element={<InternalNetworkLayer2 />} />
         <Route path="/network-layer2" element={<InternalNetworkLayer2 />} />
         <Route path="/internal-network" element={<InternalNetworkLayer2 />} />
         <Route path="/analytics" element={<InternalNetworkLayer2 />} />
 
-        {/* 04. Threat Detection & Incidents */}
-        <Route path="/threats" element={<ThreatDetection />} />
-        <Route path="/threat-detection" element={<ThreatDetection />} />
-        <Route path="/incidents" element={<Incidents />} />
-
-        {/* Central Management & Software Sensor Fleet */}
+        {/* 06. Sensors - Monitoring status and health */}
         <Route path="/sensors" element={<Sensors />} />
         <Route path="/management" element={<Sensors />} />
 
-        {/* 05. Device Quarantine - Internal Isolation Controls & Audit Log */}
-        <Route path="/quarantine" element={<DeviceQuarantine />} />
+        {/* 07. Rules - Detection configuration */}
+        <Route path="/rules" element={<Rules />} />
 
-        {/* 06. Reports - Incident Reports & SOC Compliance Audits */}
+        {/* 08. Reports - Historical analysis */}
         <Route path="/reports" element={<Reports />} />
 
-        {/* 07. Settings - NIC Config, AI Thresholds & System Health */}
+        {/* 09. Settings - Users, roles and organisation settings */}
         <Route path="/settings" element={<Settings />} />
+
+        {/* Quarantine & Response Controls */}
+        <Route path="/quarantine" element={<DeviceQuarantine />} />
 
         {/* Legacy redirect for reports-settings */}
         <Route path="/reports-settings" element={<Navigate to="/reports" replace />} />

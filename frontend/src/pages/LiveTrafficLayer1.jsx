@@ -1,8 +1,10 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useSearchParams, useNavigate } from 'react-router-dom';
 import {
   Activity,
   Shield,
+  ShieldAlert,
+  ArrowRight,
   Play,
   Pause,
   Filter,
@@ -62,11 +64,14 @@ const normalizeVerdict = (action, severity, isAnomaly) => {
 
 
 export const LiveTrafficLayer1 = () => {
+  const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const initialDeviceParam = searchParams.get('device');
+  const incidentParam = searchParams.get('incident');
+  const initialIpParam = searchParams.get('ip') || searchParams.get('search');
   const { connectionStatus, subscribe } = useWebSocket();
   const [isLive, setIsLive] = useState(true);
-  const [searchQuery, setSearchQuery] = useState('');
+  const [searchQuery, setSearchQuery] = useState(initialIpParam || '');
   const [verdictFilter, setVerdictFilter] = useState('ALL');
   const [protocolFilter, setProtocolFilter] = useState('ALL');
   const [selectedDevice, setSelectedDevice] = useState(initialDeviceParam || 'ALL');
@@ -74,8 +79,12 @@ export const LiveTrafficLayer1 = () => {
 
   useEffect(() => {
     const devParam = searchParams.get('device');
+    const ipParam = searchParams.get('ip') || searchParams.get('search');
     if (devParam) {
       setSelectedDevice(devParam);
+    }
+    if (ipParam) {
+      setSearchQuery(ipParam);
     }
   }, [searchParams]);
 
@@ -620,6 +629,46 @@ export const LiveTrafficLayer1 = () => {
           <div className="text-2xl font-extrabold text-emerald-600 font-mono mt-1">0.82 ms</div>
         </div>
       </div>
+
+      {/* Supporting Events Investigation Banner */}
+      {incidentParam && (
+        <div className="bg-[#3b2a27] border border-[#cc5500] rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-md">
+          <div className="flex items-center gap-3">
+            <div className="p-2 rounded-lg bg-[#cc5500]/20 text-[#cc5500] shrink-0">
+              <ShieldAlert className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="text-xs font-bold text-[#f8f4e7] font-sans flex items-center gap-2">
+                <span>Supporting Network Events for Investigation</span>
+                <span className="font-mono bg-[#4a3330] px-2 py-0.5 rounded border border-[#6b4c45] text-[#cc5500]">
+                  {incidentParam}
+                </span>
+              </div>
+              <p className="text-[11px] text-[#d4bfb0] font-sans mt-0.5">
+                Filtering recent packet captures and active flows for target IP: <span className="font-mono font-semibold text-[#f8f4e7]">{searchQuery || 'All host traffic'}</span>
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={() => navigate('/incidents')}
+              className="text-xs font-sans font-medium text-[#cc8833] hover:text-[#f8f4e7] hover:underline flex items-center gap-1 cursor-pointer"
+            >
+              <ArrowRight className="w-3.5 h-3.5 rotate-180" />
+              Return to Incidents
+            </button>
+            <button
+              onClick={() => {
+                setSearchQuery('');
+                navigate('/live-events');
+              }}
+              className="text-xs font-sans bg-[#4a3330] hover:bg-[#5c3d38] border border-[#6b4c45] text-[#d4bfb0] px-3 py-1.5 rounded-lg transition-colors cursor-pointer"
+            >
+              Clear Filter
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Filter and Search Bar */}
       <div className="bg-white p-4 rounded-xl border border-[#e2e8f0] shadow-sm flex flex-col md:flex-row items-stretch md:items-center justify-between gap-4">

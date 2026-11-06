@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Button } from './ui/button';
 import { StatusBadge } from './StatusBadge';
 import { SeverityBadge } from './SeverityBadge';
@@ -46,6 +47,7 @@ import {
   Paperclip,
   Check,
   Plus,
+  ExternalLink,
 } from 'lucide-react';
 
 export const IncidentDetailDrawer = ({
@@ -57,6 +59,7 @@ export const IncidentDetailDrawer = ({
   isUpdating = false,
   onSelectDevice,
 }) => {
+  const navigate = useNavigate();
   const { hasCapability, role } = useAuth();
   const canModify = hasCapability('REVERSE_RESPONSE_ACTION') || role === 'admin' || role === 'analyst';
 
@@ -444,6 +447,19 @@ export const IncidentDetailDrawer = ({
               </div>
             )}
 
+            {/* Direct Navigate to Supporting Events Button */}
+            <button
+              onClick={() => {
+                navigate(`/live-events?ip=${encodeURIComponent(srcIp)}&incident=${encodeURIComponent(incidentCode)}`);
+              }}
+              className="px-2.5 py-1 rounded text-xs font-sans font-semibold bg-[#3b2a27] hover:bg-[#cc5500] hover:text-white text-[#cc5500] border border-[#cc5500]/60 flex items-center gap-1.5 cursor-pointer transition-all mr-2"
+              title="Navigate directly to supporting live events in network stream"
+            >
+              <Activity className="w-3.5 h-3.5" />
+              <span>Supporting Events ({evidenceList.length})</span>
+              <ExternalLink className="w-3 h-3 opacity-70" />
+            </button>
+
             <button
               onClick={() => setIsMaximized(!isMaximized)}
               className="w-7 h-7 flex items-center justify-center text-[#d4bfb0] hover:text-[#f8f4e7] hover:bg-[#5c3d38] rounded transition-colors"
@@ -482,6 +498,24 @@ export const IncidentDetailDrawer = ({
               </div>
               <div className="text-[11px] font-mono text-[#c4956a] truncate">
                 {srcIp} → {dstIp}
+              </div>
+            </button>
+
+            {/* Tab: Supporting Events & Evidence */}
+            <button
+              onClick={() => setActiveTab('supporting_events')}
+              className={`w-full text-left px-3 py-2.5 rounded-lg transition-all flex flex-col gap-1 cursor-pointer ${
+                activeTab === 'supporting_events'
+                  ? 'bg-[#5c3d38] text-[#f8f4e7] border border-[#6b4c45] shadow-sm'
+                  : 'text-[#d4bfb0] hover:text-[#f8f4e7] hover:bg-[#5c3d38]/50'
+              }`}
+            >
+              <div className="flex items-center gap-2">
+                <Activity className="w-4 h-4 text-[#cc5500]" />
+                <span className="text-xs font-semibold font-sans">Supporting Events</span>
+              </div>
+              <div className="text-[11px] font-mono text-[#a08070]">
+                {evidenceList.length} correlated events
               </div>
             </button>
 
@@ -829,11 +863,25 @@ export const IncidentDetailDrawer = ({
                                 {evItem.summary || evItem.title || evItem.details?.signature || 'Telemetry observation'}
                               </p>
                             </div>
-                            {evItem.dst_port && (
-                              <span className="font-mono text-[11px] text-[#d4bfb0] shrink-0 bg-[#4a3330] px-2 py-0.5 rounded border border-[#6b4c45]">
-                                Port {evItem.dst_port}
-                              </span>
-                            )}
+                            <div className="flex items-center gap-2 shrink-0">
+                              {evItem.dst_port && (
+                                <span className="font-mono text-[11px] text-[#d4bfb0] bg-[#4a3330] px-2 py-0.5 rounded border border-[#6b4c45]">
+                                  Port {evItem.dst_port}
+                                </span>
+                              )}
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  navigate(`/live-events?ip=${encodeURIComponent(srcIp)}&incident=${encodeURIComponent(incidentCode)}&event_id=${encodeURIComponent(evItem.event_id || '')}`);
+                                }}
+                                className="text-[10px] font-sans font-semibold text-[#cc5500] hover:text-white bg-[#4a3330] hover:bg-[#cc5500] border border-[#cc5500]/40 px-2 py-0.5 rounded transition-colors flex items-center gap-1 cursor-pointer"
+                                title="Inspect this specific supporting event in Live Events stream"
+                              >
+                                <span>Inspect Event</span>
+                                <ArrowRight className="w-2.5 h-2.5" />
+                              </button>
+                            </div>
                           </div>
                         );
                       })}
@@ -1048,6 +1096,139 @@ export const IncidentDetailDrawer = ({
                       </>
                     )}
                   </div>
+                </div>
+              </div>
+            )}
+
+            {/* ========================================================= */}
+            {/* VIEW: SUPPORTING EVENTS & OBSERVATIONS (ANALYST WORKFLOW) */}
+            {/* ========================================================= */}
+            {activeTab === 'supporting_events' && (
+              <div className="flex-1 overflow-y-auto p-5 space-y-5">
+                <div className="bg-[#4a3330] border border-[#6b4c45] rounded-lg p-5 space-y-4">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-3 border-b border-[#6b4c45] gap-3">
+                    <div className="flex items-center gap-2">
+                      <Activity className="w-5 h-5 text-[#cc5500]" />
+                      <div>
+                        <h2 className="text-xs font-bold uppercase tracking-wider text-[#f8f4e7] font-sans">
+                          Correlated Supporting Events ({evidenceList.length})
+                        </h2>
+                        <p className="text-[11px] text-[#d4bfb0] font-sans">
+                          Observations combined by NetrIQ Correlation Engine across time windows & network context.
+                        </p>
+                      </div>
+                    </div>
+
+                    <button
+                      onClick={() => {
+                        navigate(`/live-events?ip=${encodeURIComponent(srcIp)}&incident=${encodeURIComponent(incidentCode)}`);
+                      }}
+                      className="px-3 py-1.5 rounded-lg text-xs font-sans font-semibold bg-[#cc5500] hover:bg-[#b83a2e] text-white flex items-center gap-1.5 shadow-sm cursor-pointer shrink-0 transition-colors"
+                    >
+                      <Activity className="w-3.5 h-3.5" />
+                      <span>Jump to Live Network Stream</span>
+                      <ExternalLink className="w-3 h-3" />
+                    </button>
+                  </div>
+
+                  {evidenceList.length === 0 ? (
+                    <div className="p-8 text-center text-xs text-[#a08070] bg-[#3b2a27] rounded-lg border border-[#6b4c45] space-y-2">
+                      <ShieldAlert className="w-8 h-8 text-[#cc8833] mx-auto opacity-50" />
+                      <p className="text-[#f8f4e7] font-medium">No external telemetry observations attached yet.</p>
+                      <p className="text-[#d4bfb0]">Single-stage anomalous flow with high confidence floor.</p>
+                      <button
+                        onClick={() => {
+                          navigate(`/live-events?ip=${encodeURIComponent(srcIp)}&incident=${encodeURIComponent(incidentCode)}`);
+                        }}
+                        className="mt-2 px-3 py-1.5 rounded bg-[#4a3330] hover:bg-[#5c3d38] border border-[#6b4c45] text-[#cc5500] font-semibold text-xs inline-flex items-center gap-1 cursor-pointer"
+                      >
+                        Inspect Host Activity in Live Events →
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      {evidenceList.map((ev, idx) => {
+                        const sourceName = (ev.source || ev.type || 'netriq').toLowerCase();
+                        const badgeColor =
+                          sourceName.includes('suricata')
+                            ? 'bg-[#b83a2e]/20 text-[#b83a2e] border-[#b83a2e]/40'
+                            : sourceName.includes('zeek')
+                            ? 'bg-[#cc5500]/20 text-[#cc5500] border-[#cc5500]/40'
+                            : sourceName.includes('behaviour')
+                            ? 'bg-[#cc8833]/20 text-[#cc8833] border-[#cc8833]/40'
+                            : 'bg-[#c4956a]/20 text-[#c4956a] border-[#c4956a]/40';
+
+                        return (
+                          <div
+                            key={idx}
+                            className="bg-[#3b2a27] border border-[#6b4c45] rounded-lg p-4 space-y-3 hover:border-[#cc5500]/50 transition-colors"
+                          >
+                            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-2 border-b border-[#6b4c45]/60">
+                              <div className="flex items-center gap-2">
+                                <span className={`text-[10px] font-mono font-bold uppercase px-2 py-0.5 rounded border ${badgeColor}`}>
+                                  {sourceName.toUpperCase()}
+                                </span>
+                                {ev.mitre && (
+                                  <span className="text-[10px] font-mono text-[#c4956a] bg-[#4a3330] px-2 py-0.5 rounded border border-[#6b4c45]">
+                                    {ev.mitre}
+                                  </span>
+                                )}
+                                {ev.rule_id && (
+                                  <span className="text-[10px] font-mono text-[#a08070]">
+                                    {ev.rule_id}
+                                  </span>
+                                )}
+                              </div>
+
+                              <div className="flex items-center gap-2 text-xs font-mono text-[#a08070]">
+                                <Clock className="w-3 h-3" />
+                                <span>{ev.timestamp ? formatTimestamp(ev.timestamp) : 'Recent Observation'}</span>
+                              </div>
+                            </div>
+
+                            <p className="text-sm font-medium text-[#f8f4e7] font-sans">
+                              {ev.summary || ev.title || ev.details?.signature || 'Network event telemetry'}
+                            </p>
+
+                            <div className="flex flex-wrap items-center justify-between gap-3 pt-1 text-xs">
+                              <div className="flex items-center gap-2 font-mono text-[11px] text-[#d4bfb0]">
+                                <span className="bg-[#4a3330] px-2 py-0.5 rounded border border-[#6b4c45]">
+                                  {srcIp}{ev.src_port ? `:${ev.src_port}` : ''}
+                                </span>
+                                <ArrowRight className="w-3 h-3 text-[#a08070]" />
+                                <span className="bg-[#4a3330] px-2 py-0.5 rounded border border-[#6b4c45]">
+                                  {dstIp}{ev.dst_port ? `:${ev.dst_port}` : ''}
+                                </span>
+                              </div>
+
+                              <div className="flex items-center gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    navigate(`/live-events?ip=${encodeURIComponent(srcIp)}&incident=${encodeURIComponent(incidentCode)}&event_id=${encodeURIComponent(ev.event_id || '')}`);
+                                  }}
+                                  className="text-xs font-sans font-semibold text-white bg-[#cc5500] hover:bg-[#b83a2e] px-2.5 py-1 rounded transition-colors flex items-center gap-1 cursor-pointer shadow-sm"
+                                >
+                                  <span>View in Live Events Stream</span>
+                                  <ExternalLink className="w-3 h-3" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    navigate(`/threats?search=${encodeURIComponent(srcIp)}`);
+                                  }}
+                                  className="text-xs font-sans font-medium text-[#d4bfb0] hover:text-[#f8f4e7] bg-[#4a3330] hover:bg-[#5c3d38] border border-[#6b4c45] px-2.5 py-1 rounded transition-colors flex items-center gap-1 cursor-pointer"
+                                >
+                                  <span>Threat Detections</span>
+                                  <ArrowRight className="w-3 h-3" />
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               </div>
             )}
