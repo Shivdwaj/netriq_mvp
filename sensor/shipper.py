@@ -112,3 +112,4 @@ class SecureCloudShipper:
     async def close(self):
         if self._http_client and not self._http_client.is_closed:
             await self._http_client.aclose()
+

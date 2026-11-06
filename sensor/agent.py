@@ -129,3 +129,4 @@ class NetriqSensorAgent:
 
     async def close(self):
         await self.shipper.close()
+

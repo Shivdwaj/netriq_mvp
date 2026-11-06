@@ -31,3 +31,4 @@ class SensorConfig:
     flush_interval_sec: float = 2.0
     max_queue_size: int = 10000
     heartbeat_interval_sec: float = 30.0
+

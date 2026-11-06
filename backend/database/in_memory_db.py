@@ -39,6 +39,19 @@ class InMemoryCursor:
             res = res[:limit]
         return [dict(d) for d in res]
 
+    def __iter__(self):
+        res = self._docs[self._skip_val:]
+        if self._limit_val is not None:
+            res = res[:self._limit_val]
+        return iter([dict(d) for d in res])
+
+    async def __aiter__(self):
+        res = self._docs[self._skip_val:]
+        if self._limit_val is not None:
+            res = res[:self._limit_val]
+        for d in res:
+            yield dict(d)
+
 
 class InMemoryCollection:
     def __init__(self, name: str):
@@ -68,6 +81,10 @@ class InMemoryCollection:
                     if op == "$gt" and not (val is not None and val > op_val):
                         return False
                     if op == "$lt" and not (val is not None and val < op_val):
+                        return False
+                    if op == "$in" and (val not in op_val):
+                        return False
+                    if op == "$nin" and (val in op_val):
                         return False
                     if op == "$ne" and val == op_val:
                         return False
@@ -142,6 +159,15 @@ class InMemoryCollection:
                 self.deleted_count = c
         return DeleteResult(count)
 
+    async def delete_many(self, query: Dict[str, Any]):
+        initial_len = len(self._docs)
+        self._docs = [d for d in self._docs if not self._matches(d, query)]
+        count = initial_len - len(self._docs)
+        class DeleteResult:
+            def __init__(self, c):
+                self.deleted_count = c
+        return DeleteResult(count)
+
     def find(self, query: Optional[Dict[str, Any]] = None):
         q = query or {}
         matched = [d for d in self._docs if self._matches(d, q)]
@@ -151,8 +177,20 @@ class InMemoryCollection:
         q = query or {}
         return len([d for d in self._docs if self._matches(d, q)])
 
-    async def create_index(self, *args, **kwargs):
-        return True
+    async def create_index(self, keys, **kwargs):
+        if not hasattr(self, "_indexes"):
+            self._indexes = []
+        name = kwargs.get("name", f"idx_{len(self._indexes)}")
+        idx_info = {"key": keys, "name": name, **kwargs}
+        self._indexes.append(idx_info)
+        return name
+
+    def index_information(self) -> Dict[str, Any]:
+        info: Dict[str, Any] = {}
+        if hasattr(self, "_indexes"):
+            for idx in self._indexes:
+                info[idx["name"]] = idx
+        return info
 
 
 class InMemoryDatabase:

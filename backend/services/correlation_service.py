@@ -6,6 +6,8 @@ from backend.utils.logger import get_logger
 from backend.pipeline.schemas import NormalizedSecurityEvent, EventType
 from backend.database.collections import incidents_repo
 from backend.services.notification_service import notification_service
+from backend.services.evidence_service import evidence_service
+from backend.schemas.entities import IncidentEventRole
 
 logger = get_logger(__name__)
 
@@ -436,6 +438,16 @@ class CorrelationEngine:
                     "evidence": evidence_slice,
                     "recommended_investigation_steps": investigation_steps
                 })
+                if getattr(event, "event_id", None):
+                    try:
+                        await evidence_service.link_event_to_incident(
+                            tenant_id=event.tenant_id or "default",
+                            incident_id=tracker.active_incident_id,
+                            event_id=event.event_id,
+                            role_in_incident=IncidentEventRole.SUPPORTING
+                        )
+                    except Exception:
+                        pass
                 logger.info(f"[CorrelationEngine] Updated Incident {tracker.active_incident_id} with {len(attack_chain)} attack stages.")
                 return
             except Exception:
@@ -471,6 +483,22 @@ class CorrelationEngine:
             tracker.active_incident_id = inc_id
             incident_doc["id"] = inc_id
             logger.info(f"[CorrelationEngine] Generated Intelligence Incident {inc_id} ({severity}) for {target_ip}")
+
+            # Link contributing events to incident
+            for ev in tracker.events:
+                eid = ev.get("event_id") if isinstance(ev, dict) else getattr(ev, "event_id", None)
+                if eid:
+                    try:
+                        fid = ev.get("finding_id") if isinstance(ev, dict) else None
+                        await evidence_service.link_event_to_incident(
+                            tenant_id=incident_doc["tenant_id"],
+                            incident_id=inc_id,
+                            event_id=eid,
+                            alert_id=fid,
+                            role_in_incident=IncidentEventRole.TRIGGER if eid == getattr(event, "event_id", None) else IncidentEventRole.SUPPORTING
+                        )
+                    except Exception:
+                        pass
 
             # Realtime broadcast to SOC Analyst Dashboard via WebSocket
             await notification_service.notify_new_incident(incident_doc)

@@ -89,10 +89,7 @@ class LocalPcapBuffer:
         src_ip: Optional[str] = None,
         dst_ip: Optional[str] = None,
         flow_id: Optional[str] = None,
-        start_time: Optional[float] = None,
-        end_time: Optional[float] = None,
-        time_range: Optional[tuple[float, float]] = None,
-        max_packets: int = 50
+        time_range: Optional[tuple[float, float]] = None
     ) -> List[Dict[str, Any]]:
         """
         Selective PCAP retrieval authorized for a specific investigation.
@@ -105,10 +102,6 @@ class LocalPcapBuffer:
             if dst_ip and pkt.dst_ip != dst_ip:
                 continue
             if flow_id and pkt.flow_id != flow_id:
-                continue
-            if start_time is not None and pkt.timestamp < start_time:
-                continue
-            if end_time is not None and pkt.timestamp > end_time:
                 continue
             if time_range:
                 start, end = time_range
@@ -123,13 +116,11 @@ class LocalPcapBuffer:
                 "dst_port": pkt.dst_port,
                 "protocol": pkt.protocol,
                 "length": pkt.packet_len,
-                "payload_hex": pkt.raw_payload_snippet.hex(),
-                "hex_preview": pkt.raw_payload_snippet.hex()[:32]
+                "payload_hex": pkt.raw_payload_snippet.hex()
             })
-            if len(results) >= max_packets:
-                break
         return results
 
     @property
     def total_buffered_packets(self) -> int:
         return len(self._buffer)
+

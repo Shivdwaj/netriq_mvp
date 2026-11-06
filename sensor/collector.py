@@ -64,3 +64,4 @@ class EventCollector:
             severity="INFO",
             evidence={"conn_state": state}
         )
+

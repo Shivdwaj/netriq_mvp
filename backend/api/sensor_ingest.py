@@ -31,6 +31,15 @@ def _get_request_tenant(req: Request) -> str:
         return auth_user.get("tenant_id")
     return req.headers.get("X-Tenant-ID", "default")
 
+def _get_request_user(req: Request) -> str:
+    """Extracts username or identity from request auth state."""
+    auth_user = getattr(req.state, "user", None)
+    if isinstance(auth_user, dict):
+        return auth_user.get("username") or auth_user.get("sub") or "analyst@netriq.local"
+    if isinstance(auth_user, str):
+        return auth_user
+    return "analyst@netriq.local"
+
 
 # --- Sensor Registration & Health (A. Local sensor -> Central platform) ---
 
@@ -151,6 +160,7 @@ async def list_sensors(req: Request):
 async def get_selective_pcap(
     sensor_id: str,
     req: Request,
+    incident_id: Optional[str] = None,
     src_ip: Optional[str] = None,
     dst_ip: Optional[str] = None,
     flow_id: Optional[str] = None,
@@ -165,9 +175,11 @@ async def get_selective_pcap(
     Raw packet payloads stay local on the sensor PCAP ring buffer.
     Only when an incident requires forensic packet drill-down does an authorized analyst
     request the targeted slice for the specific flow and timeframe.
+    When incident_id is provided, the retrieved slice is stored as external evidence and audited.
     """
     try:
         tenant_id = _get_request_tenant(req)
+        user = _get_request_user(req)
         pcap_data = await central_management_service.retrieve_selective_pcap(
             sensor_id=sensor_id,
             tenant_id=tenant_id,
@@ -178,6 +190,39 @@ async def get_selective_pcap(
             end_time=end_time,
             max_packets=max_packets
         )
+
+        # If incident_id is provided, save evidence and audit
+        if incident_id and pcap_data.get("packets"):
+            from backend.services.evidence_service import evidence_service
+            from backend.schemas.entities import AuditAction
+
+            stored_evidence = await evidence_service.store_selective_pcap(
+                tenant_id=tenant_id,
+                incident_id=incident_id,
+                sensor_id=sensor_id,
+                packets=pcap_data.get("packets", []),
+                filter_criteria={"src_ip": src_ip, "dst_ip": dst_ip, "flow_id": flow_id}
+            )
+            pcap_data["evidence_id"] = stored_evidence.evidence_id
+            pcap_data["file_hash_sha256"] = stored_evidence.file_hash_sha256
+            pcap_data["file_path"] = stored_evidence.file_path
+
+            await evidence_service.log_audit_action(
+                tenant_id=tenant_id,
+                user_id=user,
+                username=user,
+                action=AuditAction.PCAP_EXTRACT,
+                resource_type="evidence",
+                resource_id=stored_evidence.evidence_id,
+                details={
+                    "sensor_id": sensor_id,
+                    "incident_id": incident_id,
+                    "packet_count": len(pcap_data.get("packets", [])),
+                    "file_path": stored_evidence.file_path,
+                    "file_hash": stored_evidence.file_hash_sha256
+                }
+            )
+
         return pcap_data
     except ValueError as ve:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(ve))

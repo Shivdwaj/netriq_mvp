@@ -65,3 +65,4 @@ class LocalEventQueue:
     @property
     def in_flight_count(self) -> int:
         return sum(len(b) for b in self._in_flight_batches.values())
+

@@ -198,6 +198,84 @@ async def get_incident_countermeasures(incident_id: str):
         logger.error(f"Failed to get countermeasures for {incident_id}: {e}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to generate countermeasures")
 
+@router.get("/{incident_id}/evidence", dependencies=[Depends(require_permission(Capabilities.VIEW_SMART_SUMMARY))])
+async def list_incident_evidence(incident_id: str, req: Request):
+    """
+    Lists external forensic evidence records (PCAPs, memory dumps, logs)
+    associated with this incident, including storage paths and SHA-256 hashes.
+    """
+    try:
+        tenant_id = _get_request_tenant(req)
+        from backend.database.collections import evidence_repo
+        items = await evidence_repo.list_by_tenant(
+            tenant_id=tenant_id,
+            filter_query={"incident_id": incident_id},
+            limit=50
+        )
+        return items
+    except Exception as e:
+        logger.error(f"Failed to retrieve evidence for incident {incident_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to retrieve evidence")
+
+@router.get("/{incident_id}/events", dependencies=[Depends(require_permission(Capabilities.VIEW_SMART_SUMMARY))])
+async def get_incident_events(incident_id: str, req: Request):
+    """
+    Retrieves the list of supporting network events linked to this incident
+    via the incident_events join entity.
+    Allows the analyst to navigate directly from an incident to its supporting events.
+    """
+    try:
+        tenant_id = _get_request_tenant(req)
+        from backend.database.collections import incident_events_repo, network_events_repo
+        links = await incident_events_repo.list_by_tenant(
+            tenant_id=tenant_id,
+            filter_query={"incident_id": incident_id},
+            limit=100
+        )
+        # Fetch associated network event records if available
+        event_ids = [l["event_id"] for l in links if l.get("event_id")]
+        events_by_id = {}
+        if event_ids:
+            raw_events = await network_events_repo.list_by_tenant(
+                tenant_id=tenant_id,
+                filter_query={"event_id": {"$in": event_ids}},
+                limit=100
+            )
+            events_by_id = {e.get("event_id"): e for e in raw_events}
+
+        enriched = []
+        for l in links:
+            item = dict(l)
+            eid = l.get("event_id")
+            if eid in events_by_id:
+                item["network_event"] = events_by_id[eid]
+            enriched.append(item)
+
+        return enriched
+    except Exception as e:
+        logger.error(f"Failed to retrieve incident events for incident {incident_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to retrieve incident events")
+
+@router.post("/{incident_id}/evidence/{evidence_id}/verify", dependencies=[Depends(require_permission(Capabilities.VIEW_SMART_SUMMARY))])
+async def verify_incident_evidence(incident_id: str, evidence_id: str, req: Request):
+    """
+    Cryptographically verifies the SHA-256 checksum of an external PCAP evidence file.
+    Guarantees forensic integrity and non-repudiation.
+    """
+    try:
+        tenant_id = _get_request_tenant(req)
+        from backend.services.evidence_service import evidence_service
+        verification = await evidence_service.verify_evidence_integrity(
+            evidence_id=evidence_id,
+            tenant_id=tenant_id
+        )
+        return verification
+    except ValueError as ve:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(ve))
+    except Exception as e:
+        logger.error(f"Failed to verify evidence {evidence_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to verify evidence")
+
 @router.delete("/clear-all", dependencies=[Depends(require_permission(Capabilities.TRIGGER_QUARANTINE))])
 async def clear_all_incidents():
     """Wipes historical test incident records so the live SOC console starts completely fresh."""

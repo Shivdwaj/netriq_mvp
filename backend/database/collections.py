@@ -93,10 +93,70 @@ class BaseRepository:
         docs = await cursor.to_list(length=limit)
         return [self._format_out(doc) for doc in docs]
 
+    # --- Tenant-Scoped Enforcement Methods ---
+    async def get_by_tenant(self, tenant_id: str, doc_id: str) -> dict:
+        """Retrieves a single document by ID, strictly enforcing tenant isolation."""
+        obj_id = self._parse_id(doc_id)
+        query: Dict[str, Any] = {"_id": obj_id}
+        if tenant_id and tenant_id != "global":
+            query["tenant_id"] = tenant_id
+        doc = await self.collection.find_one(query)
+        if not doc:
+            raise DocumentNotFoundError(f"Document with ID {doc_id} not found in {self.collection_name} for tenant {tenant_id}")
+        return self._format_out(doc)
+
+    async def list_by_tenant(
+        self,
+        tenant_id: str,
+        filter_query: Optional[dict] = None,
+        limit: int = 50,
+        skip: int = 0,
+        sort_by: Optional[list] = None
+    ) -> List[dict]:
+        """Lists documents matching the filter, scoped strictly to the specified tenant."""
+        query = dict(filter_query) if filter_query else {}
+        if tenant_id and tenant_id != "global":
+            query["tenant_id"] = tenant_id
+        return await self.list(query, limit=limit, skip=skip, sort_by=sort_by)
+
+    async def update_by_tenant(self, tenant_id: str, doc_id: str, data: dict) -> bool:
+        """Updates a document by ID, strictly enforcing tenant isolation."""
+        obj_id = self._parse_id(doc_id)
+        query: Dict[str, Any] = {"_id": obj_id}
+        if tenant_id and tenant_id != "global":
+            query["tenant_id"] = tenant_id
+        clean_data = self._prepare_doc(data)
+        clean_data.pop("id", None)
+        clean_data.pop("_id", None)
+        if not clean_data:
+            return False
+        result = await self.collection.update_one(query, {"$set": clean_data})
+        if result.matched_count == 0:
+            raise DocumentNotFoundError(f"Document with ID {doc_id} not found in {self.collection_name} for tenant {tenant_id}")
+        return result.modified_count > 0
+
+    async def delete_by_tenant(self, tenant_id: str, doc_id: str) -> bool:
+        """Deletes a document by ID, strictly enforcing tenant isolation."""
+        obj_id = self._parse_id(doc_id)
+        query: Dict[str, Any] = {"_id": obj_id}
+        if tenant_id and tenant_id != "global":
+            query["tenant_id"] = tenant_id
+        result = await self.collection.delete_one(query)
+        if result.deleted_count == 0:
+            raise DocumentNotFoundError(f"Document with ID {doc_id} not found in {self.collection_name} for tenant {tenant_id}")
+        return True
+
+    async def count_by_tenant(self, tenant_id: str, filter_query: Optional[dict] = None) -> int:
+        """Counts documents for a tenant matching the filter."""
+        query = dict(filter_query) if filter_query else {}
+        if tenant_id and tenant_id != "global":
+            query["tenant_id"] = tenant_id
+        return await self.collection.count_documents(query)
+
 class ThreatRepository(BaseRepository):
-    """Specialized repository for high-volume Layer 1 threats/flows."""
-    def __init__(self):
-        super().__init__("threats")
+    """Specialized repository for alerts and high-volume Layer 1 threats/flows."""
+    def __init__(self, collection_name: str = "alerts"):
+        super().__init__(collection_name)
 
     def _prepare_doc(self, doc: dict) -> dict:
         clean = super()._prepare_doc(doc)
@@ -146,17 +206,53 @@ class PredictionsRepository(BaseRepository):
         return await self.get(prediction_id)
 
 
-# Expose instantiated repositories to be imported by services
-threats_repo = ThreatRepository()
-incidents_repo = BaseRepository("incidents")
-responses_repo = BaseRepository("responses")
+# ==============================================================================
+# The 12 Canonical Entity Repositories
+# ==============================================================================
+# 1. Customer Organisations
+organizations_repo = BaseRepository("organizations")
+organisations_repo = organizations_repo  # Backward compatibility alias
+
+# 2. User Accounts
 users_repo = BaseRepository("users")
+
+# 3. Access Permissions / Roles
+roles_repo = BaseRepository("roles")
+
+# 4. Registered Network Sensors
+sensors_repo = BaseRepository("sensors")
+
+# 5. Sensor Operational Status
+sensor_health_repo = BaseRepository("sensor_health")
+
+# 6. Normalised Events
+network_events_repo = BaseRepository("network_events")
+events_repo = network_events_repo  # Backward compatibility alias
+
+# 7. Detection Configurations
+detection_rules_repo = BaseRepository("detection_rules")
+rules_repo = detection_rules_repo  # Backward compatibility alias
+
+# 8. Individual Detection Alerts
+alerts_repo = ThreatRepository("alerts")
+threats_repo = alerts_repo  # Backward compatibility alias
+
+# 9. Correlated Investigations
+incidents_repo = BaseRepository("incidents")
+
+# 10. Events Linked to Incidents (Join Entity)
+incident_events_repo = BaseRepository("incident_events")
+
+# 11. Supporting Evidence References (External PCAP & File Metadata)
+evidence_repo = BaseRepository("evidence")
+
+# 12. User and Administrative Action Audit Logs
+audit_logs_repo = BaseRepository("audit_logs")
+
+# Supporting operational stores
+responses_repo = BaseRepository("responses")
 feedback_repo = BaseRepository("feedback")
 reports_repo = BaseRepository("reports")
 settings_repo = BaseRepository("settings")
 predictions_repo = PredictionsRepository()
-organisations_repo = BaseRepository("organisations")
-sensors_repo = BaseRepository("sensors")
-rules_repo = BaseRepository("rules")
-events_repo = BaseRepository("events")
 idempotency_repo = BaseRepository("idempotency")
