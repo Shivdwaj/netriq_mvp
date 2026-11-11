@@ -77,26 +77,57 @@ class ThresholdOptimizer:
         # Check if scores are in [0, 1] range vs [0, 100]
         is_normalized = bool(np.max(scores) <= 1.0 and np.min(scores) >= 0.0)
 
-        # 1. Optimal Decision Boundary Grid Search
-        candidates = np.linspace(float(np.min(scores)), float(np.max(scores)), 50)
-        best_f1 = 0.0
-        best_prec = 0.0
-        best_rec = 0.0
-        best_thresh = float(np.median(scores))
+        # 1. Optimal Decision Boundary Grid Search with Metric Selection & FPR Constraints
+        candidates = np.linspace(float(np.min(scores)), float(np.max(scores)), 100)
+        evaluated_candidates = []
 
         for cand in candidates:
             preds = (scores >= cand).astype(int)
             tp = int(np.sum((preds == 1) & (labels == 1)))
             fp = int(np.sum((preds == 1) & (labels == 0)))
             fn = int(np.sum((preds == 0) & (labels == 1)))
+            tn = int(np.sum((preds == 0) & (labels == 0)))
+
             precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
             recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
             f1 = (2 * precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
-            if f1 > best_f1:
-                best_f1 = f1
-                best_prec = precision
-                best_rec = recall
-                best_thresh = cand
+            fpr = fp / (fp + tn) if (fp + tn) > 0 else 0.0
+
+            # Evaluate chosen target_metric
+            if self.target_metric == "precision":
+                metric_val = precision if recall > 0.0 else 0.0
+            elif self.target_metric == "recall":
+                metric_val = recall
+            elif self.target_metric == "fpr":
+                metric_val = 1.0 - fpr
+            elif self.target_metric == "balanced_accuracy":
+                metric_val = (recall + (1.0 - fpr)) / 2.0
+            else:  # default "f1"
+                metric_val = f1
+
+            evaluated_candidates.append({
+                "cand": cand,
+                "metric_val": metric_val,
+                "f1": f1,
+                "precision": precision,
+                "recall": recall,
+                "fpr": fpr
+            })
+
+        # Filter candidate pool by target_false_positive_rate budget
+        valid_candidates = [
+            c for c in evaluated_candidates
+            if c["fpr"] <= target_false_positive_rate + 1e-4
+        ]
+        pool = valid_candidates if valid_candidates else evaluated_candidates
+
+        # Select candidate threshold that maximizes target_metric within FPR budget
+        best_cand = max(pool, key=lambda c: (c["metric_val"], -c["fpr"]))
+        best_thresh = best_cand["cand"]
+        best_f1 = best_cand["f1"]
+        best_prec = best_cand["precision"]
+        best_rec = best_cand["recall"]
+        best_fpr = best_cand["fpr"]
 
         # 2. Risk Tier Boundaries (scaled to 0-100)
         scaled_scores = scores * 100.0 if is_normalized else scores
@@ -121,8 +152,10 @@ class ThresholdOptimizer:
                 "f1_score": round(float(best_f1), 4),
                 "precision": round(float(best_prec), 4),
                 "recall": round(float(best_rec), 4),
+                "false_positive_rate": round(float(best_fpr), 4),
                 "sample_count": len(validation_scores),
-                "target_metric": self.target_metric
+                "target_metric": self.target_metric,
+                "target_false_positive_rate": target_false_positive_rate
             }
         }
 
@@ -135,6 +168,44 @@ class ThresholdOptimizer:
 
         logger.info(f"[ThresholdOptimizer] Calibrated thresholds: {calibrated}")
         return calibrated
+
+    def apply_to_risk_engine(self) -> Dict[str, float]:
+        """
+        Applies calibrated risk thresholds to global config and live risk engine.
+        Updates LOW_MAX, MEDIUM_MAX, HIGH_MAX boundaries.
+        """
+        import backend.config.config as global_config
+        from backend.intelligence.config import intelligence_config
+
+        global_config.RISK_THRESHOLDS.update(self.thresholds)
+        intelligence_config.severity_medium_threshold = self.thresholds.get("LOW_MAX", 40.0)
+        intelligence_config.severity_high_threshold = self.thresholds.get("MEDIUM_MAX", 70.0)
+        intelligence_config.severity_critical_threshold = self.thresholds.get("HIGH_MAX", 85.0)
+
+        logger.info(
+            f"[ThresholdOptimizer] Applied thresholds to live RiskEngine: "
+            f"MEDIUM={intelligence_config.severity_medium_threshold}, "
+            f"HIGH={intelligence_config.severity_high_threshold}, "
+            f"CRITICAL={intelligence_config.severity_critical_threshold}"
+        )
+        return self.thresholds
+
+    async def persist(self) -> bool:
+        """
+        Persists calibrated thresholds to persistent settings.
+        """
+        try:
+            from backend.services.settings_service import settings_service
+            from backend.auth.roles import Role
+            await settings_service.update_settings(
+                Role.ADMIN,
+                {"risk_thresholds": self.thresholds, "calibration_history": self.calibration_history[-10:]}
+            )
+            logger.info("[ThresholdOptimizer] Persisted calibrated thresholds to persistent settings.")
+            return True
+        except Exception as e:
+            logger.warning(f"[ThresholdOptimizer] Could not persist thresholds: {e}")
+            return False
 
     def optimize_thresholds(self) -> Dict[str, float]:
         """

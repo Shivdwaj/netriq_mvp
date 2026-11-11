@@ -1,4 +1,5 @@
 import asyncio
+import time
 import collections
 from typing import List, Callable, Awaitable, Deque, Optional, Set
 from backend.utils.logger import get_logger
@@ -42,21 +43,11 @@ class SecurityEventBus:
     async def publish(self, event: NormalizedSecurityEvent, timeout: float = 2.0) -> bool:
         """
         Publishes an event to all subscribers with bounded concurrency and backpressure.
-        If active pending tasks reach max_queue_size, applies backpressure and drops event.
+        If active pending tasks reach max_queue_size, waits up to timeout for capacity;
+        if capacity is not available within timeout, applies backpressure and drops event.
+        Guarantees atomic queue-limit verification and task enrollment under lock.
         Returns True if dispatched, False if rejected due to backpressure.
         """
-        async with self._lock:
-            self._recent_events.append(event)
-
-        # Backpressure limit check
-        if len(self._active_tasks) >= self.max_queue_size:
-            self._dropped_count += 1
-            logger.warning(
-                f"[SecurityEventBus] Backpressure limit reached ({self.max_queue_size} in-flight tasks). "
-                f"Dropped event {getattr(event, 'event_id', '?')}. Total dropped: {self._dropped_count}"
-            )
-            return False
-
         sem = self._get_semaphore()
 
         async def _bounded_dispatch(ev: NormalizedSecurityEvent):
@@ -70,33 +61,65 @@ class SecurityEventBus:
                             f"failed on event {getattr(ev, 'event_id', '?')}: {e}"
                         )
 
-        try:
-            task = asyncio.create_task(_bounded_dispatch(event))
-            self._active_tasks.add(task)
-            task.add_done_callback(self._active_tasks.discard)
-            return True
-        except RuntimeError as rt_err:
-            # Fallback if called outside active event loop
-            logger.debug(f"[SecurityEventBus] Direct fallback dispatch: {rt_err}")
-            return False
+        # Atomic backpressure limit check and task enrollment under lock with timeout
+        start_time = time.time()
+        while True:
+            async with self._lock:
+                if len(self._active_tasks) < self.max_queue_size:
+                    self._recent_events.append(event)
+                    try:
+                        task = asyncio.create_task(_bounded_dispatch(event))
+                        self._active_tasks.add(task)
+                        task.add_done_callback(self._active_tasks.discard)
+                        return True
+                    except RuntimeError as rt_err:
+                        logger.debug(f"[SecurityEventBus] Direct fallback dispatch: {rt_err}")
+                        return False
+
+            # Queue at capacity: check if backpressure wait timeout exceeded
+            elapsed = time.time() - start_time
+            if elapsed >= timeout:
+                async with self._lock:
+                    self._dropped_count += 1
+                    logger.warning(
+                        f"[SecurityEventBus] Backpressure limit reached ({self.max_queue_size} in-flight tasks). "
+                        f"Timeout ({timeout}s) exceeded. Dropped event {getattr(event, 'event_id', '?')}. "
+                        f"Total dropped: {self._dropped_count}"
+                    )
+                    return False
+            await asyncio.sleep(min(0.01, timeout))
 
     async def drain(self, timeout: float = 5.0):
         """Awaits completion of all currently in-flight dispatch tasks."""
-        if self._active_tasks:
+        tasks_to_wait = list(self._active_tasks)
+        if tasks_to_wait:
             try:
                 await asyncio.wait_for(
-                    asyncio.gather(*list(self._active_tasks), return_exceptions=True),
+                    asyncio.gather(*tasks_to_wait, return_exceptions=True),
                     timeout=timeout
                 )
             except (asyncio.TimeoutError, TimeoutError):
                 pass
 
-    async def shutdown(self):
-        """Cancels all active in-flight dispatch tasks on server shutdown."""
-        for task in list(self._active_tasks):
-            task.cancel()
+    async def shutdown(self, drain_timeout: float = 5.0):
+        """
+        Gracefully shuts down event bus by draining in-flight dispatch tasks first,
+        only cancelling remaining tasks if drain timeout is exceeded.
+        """
+        # 1. Attempt graceful drain before forced cancellation
         if self._active_tasks:
-            await asyncio.gather(*list(self._active_tasks), return_exceptions=True)
+            try:
+                await self.drain(timeout=drain_timeout)
+            except Exception as drain_err:
+                logger.debug(f"[SecurityEventBus] Drain encountered exception during shutdown: {drain_err}")
+
+        # 2. Cancel any remaining unfinished tasks that exceeded timeout
+        remaining = list(self._active_tasks)
+        for task in remaining:
+            if not task.done():
+                task.cancel()
+        if remaining:
+            await asyncio.gather(*remaining, return_exceptions=True)
         self._active_tasks.clear()
 
     @property

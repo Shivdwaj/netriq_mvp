@@ -760,15 +760,15 @@ async def test_response_engine_cidr_infrastructure_and_quarantine_quota():
         engine._recent_quarantines = {}
 
         # 1st quarantine: Allowed
-        q1 = await engine.handle_verdict(pred, Action.QUARANTINE, {"src_ip": "192.168.1.51", "src_mac": "00:aa"})
+        q1 = await engine.handle_verdict(pred, Action.QUARANTINE, {"src_ip": "192.168.1.51", "src_mac": "00:11:22:33:44:51"})
         assert q1 is True
 
         # 2nd quarantine: Allowed
-        q2 = await engine.handle_verdict(pred, Action.QUARANTINE, {"src_ip": "192.168.1.52", "src_mac": "00:bb"})
+        q2 = await engine.handle_verdict(pred, Action.QUARANTINE, {"src_ip": "192.168.1.52", "src_mac": "00:11:22:33:44:52"})
         assert q2 is True
 
         # 3rd quarantine exceeds quota (2 max per hour): Suppressed/bypassed
-        q3 = await engine.handle_verdict(pred, Action.QUARANTINE, {"src_ip": "192.168.1.53", "src_mac": "00:cc"})
+        q3 = await engine.handle_verdict(pred, Action.QUARANTINE, {"src_ip": "192.168.1.53", "src_mac": "00:11:22:33:44:53"})
         assert q3 is False
         assert engine.quarantine.quarantine_device.call_count == 2
 
@@ -1346,6 +1346,236 @@ async def test_localized_forensic_event_explanation():
     assert len(explanation["risk_factors"]) >= 2
     assert "auth.corp.local" in str(explanation["risk_factors"])
     assert "T1046" in explanation["mitre_technique"]
+
+
+@pytest.mark.asyncio
+async def test_event_bus_atomic_concurrency_and_graceful_shutdown():
+    """
+    Verify EventBus queue limit checking and task enrollment are atomic under load,
+    and shutdown drains in-flight tasks before cancelling.
+    """
+    from backend.pipeline.event_bus import SecurityEventBus
+    from backend.pipeline.schemas import NormalizedSecurityEvent
+
+    bus = SecurityEventBus(max_concurrency=10, max_queue_size=10)
+    processed_count = 0
+
+    async def slow_subscriber(ev):
+        nonlocal processed_count
+        await asyncio.sleep(0.05)
+        processed_count += 1
+
+    bus.subscribe(slow_subscriber)
+
+    evt = NormalizedSecurityEvent(
+        tenant_id="test",
+        source_ip="192.168.1.1",
+        destination_ip="192.168.1.2",
+        source_port=1000,
+        destination_port=80,
+        protocol="TCP"
+    )
+
+    # Concurrently publish 40 events with 0.001s backpressure timeout
+    results = await asyncio.gather(*[bus.publish(evt, timeout=0.001) for _ in range(40)])
+
+    # Max queue size is 10: exactly 10 accepted, 30 rejected
+    accepted = sum(1 for r in results if r is True)
+    rejected = sum(1 for r in results if r is False)
+    assert accepted == 10
+    assert rejected == 30
+    assert bus.dropped_count == 30
+    assert bus.queue_depth <= 10
+
+    # Test graceful shutdown (drains in-flight tasks)
+    await bus.shutdown(drain_timeout=2.0)
+    assert bus.queue_depth == 0
+    assert processed_count == 10
+
+
+@pytest.mark.asyncio
+async def test_multi_tenant_correlation_isolation():
+    """
+    Verify CorrelationEngine maintains independent trackers for different tenants
+    even when RFC1918 private IP addresses overlap (e.g. 10.0.0.99).
+    """
+    from backend.services.correlation_service import CorrelationEngine
+    from backend.pipeline.schemas import NormalizedSecurityEvent
+
+    engine = CorrelationEngine()
+
+    # Tenant Alpha event from 10.0.0.99
+    evt_alpha = NormalizedSecurityEvent(
+        tenant_id="org_alpha",
+        source_ip="10.0.0.99",
+        destination_ip="10.0.0.1",
+        source_port=50000,
+        destination_port=445,
+        protocol="TCP",
+        event_type="connection"
+    )
+
+    # Tenant Beta event from exact same IP 10.0.0.99
+    evt_beta = NormalizedSecurityEvent(
+        tenant_id="org_beta",
+        source_ip="10.0.0.99",
+        destination_ip="10.0.0.1",
+        source_port=50001,
+        destination_port=3389,
+        protocol="TCP",
+        event_type="connection"
+    )
+
+    await engine.process_event(evt_alpha)
+    await engine.process_event(evt_beta)
+
+    # Ensure separate trackers exist under composite tenant keys
+    assert "org_alpha:10.0.0.99" in engine._trackers
+    assert "org_beta:10.0.0.99" in engine._trackers
+
+    tracker_alpha = engine._trackers["org_alpha:10.0.0.99"]
+    tracker_beta = engine._trackers["org_beta:10.0.0.99"]
+
+    assert tracker_alpha is not tracker_beta
+    assert len(tracker_alpha.events) == 1
+    assert len(tracker_beta.events) == 1
+    assert tracker_alpha.events[0]["dst_port"] == 445
+    assert tracker_beta.events[0]["dst_port"] == 3389
+
+
+@pytest.mark.asyncio
+async def test_threshold_optimizer_fpr_budget_and_live_risk_engine_application():
+    """
+    Verify ThresholdOptimizer applies false positive rate constraints,
+    respects target_metric (precision), and applies calibrated thresholds to live RiskEngine.
+    """
+    from backend.ai.threshold_optimizer import ThresholdOptimizer
+    from backend.intelligence.config import intelligence_config
+    import numpy as np
+
+    optimizer = ThresholdOptimizer(target_metric="precision")
+
+    # Generate synthetic scores
+    np.random.seed(123)
+    benign = np.random.normal(loc=0.3, scale=0.1, size=80).tolist()
+    malicious = np.random.normal(loc=0.8, scale=0.1, size=80).tolist()
+    scores = benign + malicious
+    labels = [0] * 80 + [1] * 80
+
+    calibrated = optimizer.calibrate(scores, labels, target_false_positive_rate=0.05)
+
+    assert calibrated["calibrated"] is True
+    assert calibrated["metrics"]["false_positive_rate"] <= 0.05 + 1e-4
+    assert calibrated["metrics"]["target_metric"] == "precision"
+
+    # Apply to live RiskEngine with isolated restore
+    import backend.config.config as global_config
+    orig_thresholds = dict(global_config.RISK_THRESHOLDS)
+    orig_med = intelligence_config.severity_medium_threshold
+    orig_high = intelligence_config.severity_high_threshold
+    orig_crit = intelligence_config.severity_critical_threshold
+
+    try:
+        optimizer.apply_to_risk_engine()
+        assert intelligence_config.severity_medium_threshold == calibrated["LOW_MAX"]
+        assert intelligence_config.severity_high_threshold == calibrated["MEDIUM_MAX"]
+        assert intelligence_config.severity_critical_threshold == calibrated["HIGH_MAX"]
+
+        # Persist
+        persisted = await optimizer.persist()
+        assert persisted is True
+    finally:
+        global_config.RISK_THRESHOLDS.clear()
+        global_config.RISK_THRESHOLDS.update(orig_thresholds)
+        intelligence_config.severity_medium_threshold = orig_med
+        intelligence_config.severity_high_threshold = orig_high
+        intelligence_config.severity_critical_threshold = orig_crit
+
+
+@pytest.mark.asyncio
+async def test_zeek_adapter_malformed_numeric_ports_handling():
+    """
+    Verify ZeekAdapter safely catches malformed/non-numeric port values
+    without raising exceptions and records dropped malformed metrics.
+    """
+    from backend.adapters.zeek_adapter import ZeekAdapter
+
+    adapter = ZeekAdapter()
+    malformed_record = {
+        "id.orig_h": "192.168.1.50",
+        "id.resp_h": "10.0.0.1",
+        "id.orig_p": "invalid_not_a_number",
+        "id.resp_p": 80,
+        "proto": "tcp"
+    }
+
+    res = adapter.transform(malformed_record)
+    assert res is None
+    assert adapter.malformed_count == 1
+    metrics = adapter.get_metrics()
+    assert metrics["malformed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_response_engine_mac_spoofing_mismatch_and_idempotent_retry():
+    """
+    Verify ResponseEngine suppresses quarantine when supplied MAC contradicts
+    authoritative IdentityResolver, and treats 409 Conflict/already-enforced as idempotent success.
+    """
+    from backend.response.response_engine import ResponseEngine
+    from backend.ai.contracts import Action, PredictionResult, RiskCategory
+    from backend.pipeline.identity_resolver import identity_resolver
+    from unittest.mock import AsyncMock, patch
+
+    engine = ResponseEngine()
+    engine.quarantine.quarantine_device = AsyncMock(return_value=True)
+
+    # 1. Authoritative identity registration
+    identity_resolver.register_device(
+        ip="192.168.1.150",
+        mac="00:11:22:33:44:55",
+        hostname="finance-workstation",
+        is_managed=True
+    )
+
+    pred = PredictionResult(
+        verdict=True,
+        confidence=98.0,
+        risk_category=RiskCategory.CRITICAL,
+        model_used="FusionEngine",
+        latency_ms=1.0
+    )
+
+    with patch("backend.services.settings_service.settings_service.get_settings", new_callable=AsyncMock, return_value={"auto_quarantine": True}):
+        # Attacker claims target IP 192.168.1.150 but presents a spoofed MAC address
+        spoofed_result = await engine.handle_verdict(
+            prediction=pred,
+            action=Action.QUARANTINE,
+            context={"src_ip": "192.168.1.150", "src_mac": "AA:BB:CC:DD:EE:FF"}  # Contradicts 00:11:22:33:44:55
+        )
+        assert spoofed_result is False
+        assert engine.quarantine.quarantine_device.call_count == 0
+
+        # Legitimate MAC matching authoritative identity: quarantine succeeds
+        legit_result = await engine.handle_verdict(
+            prediction=pred,
+            action=Action.QUARANTINE,
+            context={"src_ip": "192.168.1.150", "src_mac": "00:11:22:33:44:55"}
+        )
+        assert legit_result is True
+        assert engine.quarantine.quarantine_device.call_count == 1
+
+        # 2. Idempotency test: adapter throws error indicating target already blocked
+        async def already_blocked_action(ip, reason):
+            raise Exception("Rule already exists on firewall: target IP is already blocked")
+
+        engine.firewall.block_ip = AsyncMock(side_effect=already_blocked_action)
+        idempotent_res = await engine.handle_verdict(
+            prediction=pred,
+            action=Action.RECOMMEND_BLOCK,
+            context={"src_ip": "198.51.100.99"}
+        )
+        assert idempotent_res is True
 
 
 

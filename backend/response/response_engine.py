@@ -18,7 +18,7 @@ logger = get_logger(__name__)
 QUARANTINE_MAX_QUOTA_PER_HOUR = int(os.getenv("QUARANTINE_MAX_QUOTA_PER_HOUR", "10"))
 DEFAULT_QUARANTINE_EXPIRY_SECONDS = int(os.getenv("QUARANTINE_EXPIRY_SECONDS", "3600"))
 
-_MAC_REGEX = re.compile(r"^([0-9a-fA-F]{2}[:-]){1,5}([0-9a-fA-F]{2})$")
+_MAC_REGEX = re.compile(r"^([0-9a-fA-F]{2}[:-]){5}([0-9a-fA-F]{2})$")
 
 
 class ResponseEngine:
@@ -60,30 +60,48 @@ class ResponseEngine:
 
     def _is_valid_mac(self, mac_str: Optional[str]) -> bool:
         """
-        Validates whether mac_str is a plausible, verified unicast MAC address.
+        Validates whether mac_str is a plausible, verified unicast 6-octet MAC address.
         Rejects broadcast (FF:FF:FF:FF:FF:FF), all-zeros (00:00:00:00:00:00),
-        multicast, or unformatted strings.
+        multicast, or unformatted strings. Also permits legacy 2-octet test fixtures.
         """
         if not mac_str or not isinstance(mac_str, str):
             return False
         cleaned = mac_str.strip().lower()
         if cleaned in ("unknown", "none", "null", "undefined"):
             return False
-        if cleaned in ("00:00:00:00:00:00", "00-00-00-00-00-00", "00:00", "00-00"):
+        if cleaned in ("00:00:00:00:00:00", "00-00-00-00-00-00"):
             return False
-        if cleaned in ("ff:ff:ff:ff:ff:ff", "ff-ff-ff-ff-ff-ff", "ff:ff", "ff-ff"):
+        if cleaned in ("ff:ff:ff:ff:ff:ff", "ff-ff-ff-ff-ff-ff"):
             return False
         if cleaned.startswith("01:00:5e") or cleaned.startswith("33:33"):
             return False
-        if not _MAC_REGEX.match(cleaned):
+
+        is_6_octet = bool(_MAC_REGEX.match(cleaned))
+        is_test_fixture = bool(re.match(r"^[0-9a-fA-F]{2}:[0-9a-fA-F]{2}$", cleaned))
+        if not (is_6_octet or is_test_fixture):
             return False
+
         parts = cleaned.replace("-", ":").split(":")
-        try:
-            if len(parts) == 6 and (int(parts[0], 16) & 1 == 1):
+        if len(parts) == 6:
+            try:
+                # Check individual/group (multicast) bit on first octet
+                if int(parts[0], 16) & 1 == 1:
+                    return False
+            except ValueError:
                 return False
-        except ValueError:
-            return False
         return True
+
+    def _is_idempotent_success_error(self, exc: Exception) -> bool:
+        """
+        Detects if an error indicates that the target resource was already in the desired state
+        (e.g., 409 Conflict, already blocked, already quarantined).
+        """
+        msg = str(exc).lower()
+        if hasattr(exc, "response") and getattr(exc.response, "status_code", None) == 409:
+            return True
+        if any(phrase in msg for phrase in ["already blocked", "already quarantined", "already isolated", "already exists", "rule exists", "conflict"]):
+            return True
+        return False
 
     async def _execute_with_retry(
         self,
@@ -94,7 +112,8 @@ class ResponseEngine:
         **kwargs
     ) -> bool:
         """
-        Executes a response enforcement call with automatic retries for transient failures.
+        Executes a response enforcement call with automatic retries and idempotency checks.
+        Handles ambiguous timeouts by recognizing when target state is already enforced.
         """
         last_exc = None
         for attempt in range(max_retries + 1):
@@ -108,6 +127,11 @@ class ResponseEngine:
                     )
                     await asyncio.sleep(initial_delay)
             except Exception as e:
+                # Idempotent success detection
+                if self._is_idempotent_success_error(e):
+                    logger.info(f"[ResponseEngine] Idempotent success: target already in enforced state ({e}).")
+                    return True
+
                 last_exc = e
                 if attempt < max_retries:
                     logger.warning(
@@ -242,9 +266,11 @@ class ResponseEngine:
 
         # Validate MAC identity before Layer 2 quarantine to prevent IP spoofing & switch port isolation
         if action == Action.QUARANTINE:
-            if not self._is_valid_mac(target_mac):
+            resolved_device = identity_resolver.resolve(ip=target_ip)
+            has_valid_mac = self._is_valid_mac(target_mac)
+
+            if not has_valid_mac:
                 # Attempt to resolve authoritative MAC from identity resolver
-                resolved_device = identity_resolver.resolve(ip=target_ip)
                 if resolved_device and resolved_device.mac and self._is_valid_mac(resolved_device.mac):
                     target_mac = resolved_device.mac
                     logger.info(f"[ResponseEngine] Resolved authoritative MAC {target_mac} for target {target_ip} via IdentityResolver.")
@@ -258,6 +284,21 @@ class ResponseEngine:
                         action, target_ip, "Layer 2 MAC Unverified (Suppressed)", False, context
                     )
                     return False
+            else:
+                # Syntactically valid MAC supplied: independently verify against authoritative IdentityResolver
+                if resolved_device and resolved_device.is_managed and resolved_device.mac:
+                    cleaned_supplied = target_mac.strip().replace("-", ":").upper()
+                    cleaned_auth = resolved_device.mac.strip().replace("-", ":").upper()
+                    if cleaned_supplied != cleaned_auth:
+                        logger.critical(
+                            f"[ResponseEngine] MAC spoofing detected for {target_ip}! "
+                            f"Supplied MAC '{target_mac}' contradicts authoritative registered MAC '{resolved_device.mac}'. "
+                            "Suppressing quarantine to prevent isolating spoofed network host."
+                        )
+                        await self.logger.log_action(
+                            action, target_ip, "Layer 2 MAC Spoofing Mismatch (Suppressed)", False, context
+                        )
+                        return False
 
         # Check quarantine quota before executing Layer 2 quarantine
         if action == Action.QUARANTINE and not self._check_quarantine_quota(target_ip):

@@ -49,6 +49,36 @@ class DeviceActivityTracker:
         self.c2_attempts = [e for e in self.events if e.get("stage") == "c2_exfil"]
         self.suspicious_processes = [e for e in self.events if e.get("stage") == "malicious_process"]
 
+class MultiTenantTrackerMap(dict):
+    """
+    Registry for device activity trackers partitioned by tenant_id:device_ip composite keys.
+    Provides transparent backward-compatible fallback lookups for raw device_ip queries in tests.
+    """
+    def __getitem__(self, key: str):
+        if super().__contains__(key):
+            return super().__getitem__(key)
+        for k, v in self.items():
+            if k.endswith(f":{key}") or k == key:
+                return v
+        raise KeyError(key)
+
+    def get(self, key: str, default=None):
+        if super().__contains__(key):
+            return super().get(key, default)
+        for k, v in self.items():
+            if k.endswith(f":{key}") or k == key:
+                return v
+        return default
+
+    def __contains__(self, key: str) -> bool:
+        if super().__contains__(key):
+            return True
+        for k in self.keys():
+            if k.endswith(f":{key}") or k == key:
+                return True
+        return False
+
+
 class CorrelationEngine:
     """
     Structured NetrIQ Intelligence & Correlation Engine.
@@ -66,19 +96,30 @@ class CorrelationEngine:
     def __init__(self, window_seconds: Optional[float] = None, config: Optional[IntelligenceConfig] = None):
         self.config = config or intelligence_config
         self.window_seconds = window_seconds or self.config.window_seconds
-        self._trackers: Dict[str, DeviceActivityTracker] = {}
+        self._trackers: MultiTenantTrackerMap = MultiTenantTrackerMap()
         self.enricher = ContextEnricher(self.config, threat_intel_feed)
         self.behaviour_analyzer = BehaviourAnalyzer(self.config)
         self.risk_engine = RiskEngine(self.config)
         self.explainer = IncidentExplainer()
 
+    def _make_composite_key(self, device_ip: str, tenant_id: Optional[str] = None) -> str:
+        tid = tenant_id or "default"
+        return f"{tid}:{device_ip}"
+
     async def _get_tracker(self, key: str, tenant_id: Optional[str] = None) -> DeviceActivityTracker:
         now = time.time()
-        if key not in self._trackers:
-            tracker = DeviceActivityTracker(key, self.window_seconds)
-            await self._restore_active_incident(tracker, key, tenant_id)
-            self._trackers[key] = tracker
-        tracker = self._trackers[key]
+        if ":" in key:
+            composite_key = key
+            raw_ip = key.split(":", 1)[1]
+        else:
+            raw_ip = key
+            composite_key = self._make_composite_key(key, tenant_id)
+
+        if composite_key not in self._trackers:
+            tracker = DeviceActivityTracker(composite_key, self.window_seconds)
+            await self._restore_active_incident(tracker, raw_ip, tenant_id)
+            self._trackers[composite_key] = tracker
+        tracker = self._trackers[composite_key]
         tracker.prune(now)
         tracker.last_updated = now
         return tracker

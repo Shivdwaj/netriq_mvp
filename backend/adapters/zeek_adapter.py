@@ -76,8 +76,16 @@ class ZeekAdapter(BaseEventAdapter):
             logger.warning(f"[ZeekAdapter] Missing required IP fields (src_ip={src_ip}, dst_ip={dst_ip})")
             return None
 
-        src_port = int(record.get("id.orig_p") or record.get("id", {}).get("orig_p") or record.get("src_port") or 0)
-        dst_port = int(record.get("id.resp_p") or record.get("id", {}).get("resp_p") or record.get("dst_port") or 0)
+        try:
+            src_port = int(record.get("id.orig_p") or record.get("id", {}).get("orig_p") or record.get("src_port") or 0)
+            dst_port = int(record.get("id.resp_p") or record.get("id", {}).get("resp_p") or record.get("dst_port") or 0)
+            orig_bytes = int(record.get("orig_bytes") or record.get("orig_ip_bytes") or 0)
+            resp_bytes = int(record.get("resp_bytes") or record.get("resp_ip_bytes") or 0)
+        except (ValueError, TypeError) as num_err:
+            self.malformed_count += 1
+            logger.warning(f"[ZeekAdapter] Malformed numeric fields (ports/bytes) in event: {num_err}")
+            return None
+
         proto = str(record.get("proto", "tcp")).upper()
         ts_raw = record.get("ts", time.time())
 
@@ -86,9 +94,6 @@ class ZeekAdapter(BaseEventAdapter):
 
         device = identity_resolver.resolve(ip=src_ip)
         direction = _determine_direction(src_ip, dst_ip)
-
-        orig_bytes = int(record.get("orig_bytes") or record.get("orig_ip_bytes") or 0)
-        resp_bytes = int(record.get("resp_bytes") or record.get("resp_ip_bytes") or 0)
 
         raw_evidence = {
             "zeek_uid": record.get("uid"),
