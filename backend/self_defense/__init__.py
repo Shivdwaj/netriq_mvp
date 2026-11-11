@@ -28,6 +28,10 @@ from backend.self_defense.schemas import (
     AssetManifestEntry,
     IntelligenceManifest,
     IntelligenceIntegrityVerdict,
+    CanaryTokenType,
+    CanaryTriggerEvent,
+    AdminAnomalyType,
+    DualApprovalRecord,
 )
 from backend.self_defense.audit_ledger import (
     CryptographicallySealedAuditLedger,
@@ -69,6 +73,14 @@ from backend.self_defense.intelligence_guard import (
     verify_manifest_signature,
     hash_file_sha256,
 )
+from backend.self_defense.management_monitor import (
+    ManagementSecurityMonitor,
+    management_monitor,
+    ManagementSecurityError,
+    AdminAnomalyError,
+    DualApprovalRequiredError,
+    FailClosedAuditError,
+)
 
 __all__ = [
     "AuditRecord",
@@ -87,6 +99,10 @@ __all__ = [
     "AssetManifestEntry",
     "IntelligenceManifest",
     "IntelligenceIntegrityVerdict",
+    "CanaryTokenType",
+    "CanaryTriggerEvent",
+    "AdminAnomalyType",
+    "DualApprovalRecord",
     "CryptographicallySealedAuditLedger",
     "AuditStorageError",
     "AuditTamperError",
@@ -117,5 +133,11 @@ __all__ = [
     "sign_manifest_payload",
     "verify_manifest_signature",
     "hash_file_sha256",
+    "ManagementSecurityMonitor",
+    "management_monitor",
+    "ManagementSecurityError",
+    "AdminAnomalyError",
+    "DualApprovalRequiredError",
+    "FailClosedAuditError",
 ]
 

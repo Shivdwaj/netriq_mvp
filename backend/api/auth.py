@@ -17,6 +17,11 @@ from backend.auth.exceptions import (
 )
 from backend.database.exceptions import DocumentNotFoundError
 from backend.utils.logger import get_logger
+from backend.self_defense.management_monitor import (
+    management_monitor,
+    ManagementSecurityError,
+    FailClosedAuditError,
+)
 
 logger = get_logger(__name__)
 
@@ -65,9 +70,25 @@ async def initial_setup(request: InitialSetupRequest):
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to initialize administrator.")
 
 @router.post("/login", response_model=TokenResponse)
-async def login(request: LoginRequest):
+async def login(request: LoginRequest, req: Request):
+    client_ip = req.client.host if req.client else "unknown"
+    candidate_id = request.resolved_identity
+    # Management Security Monitor Canary Token Check
+    is_canary = await management_monitor.check_canary_probe(
+        candidate_value=candidate_id,
+        source_ip=client_ip,
+        endpoint="/api/v1/auth/login",
+        method="POST"
+    )
+    if is_canary:
+        # Deliberately return standard generic 401 without revealing canary detection
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password."
+        )
+
     try:
-        result = await auth_service.login(request.identity, request.password)
+        result = await auth_service.login(candidate_id, request.password)
         return TokenResponse(**result)
     except InvalidCredentialsError as e:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(e))
@@ -95,8 +116,30 @@ async def logout(request: Request, refresh_req: RefreshRequest):
 
 @router.post("/register", response_model=MessageResponse, dependencies=[Depends(require_permission(Capabilities.MANAGE_USERS))])
 async def register(request: RegisterRequest, req: Request):
+    admin_user = getattr(req.state, "user", {}) or {}
+    admin_id = admin_user.get("sub") or admin_user.get("email") or "admin"
+    tenant_id = admin_user.get("tenant_id", "default")
+
+    # Management Security Monitor Rate Limit & Anomaly Check
     try:
-        admin_id = req.state.user.get("sub")
+        management_monitor.check_admin_rate_limits(actor_id=admin_id, action="REGISTER_USER", tenant_id=tenant_id)
+    except ManagementSecurityError as mse:
+        raise HTTPException(status_code=mse.status_code, detail=str(mse))
+
+    # Mandatory Fail-Closed Audit Enforcement
+    try:
+        await management_monitor.enforce_mutation_audit(
+            action="REGISTER_USER",
+            actor=admin_user,
+            resource_type="user",
+            resource_id=request.email,
+            details={"email": request.email, "role": str(request.role)},
+            tenant_id=tenant_id
+        )
+    except FailClosedAuditError as fce:
+        raise HTTPException(status_code=fce.status_code, detail=str(fce))
+
+    try:
         await auth_service.register_user(
             admin_user_id=admin_id,
             email=request.email,

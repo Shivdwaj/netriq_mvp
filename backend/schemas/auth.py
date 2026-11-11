@@ -6,11 +6,13 @@ from typing import Optional
 class LoginRequest(BaseModel):
     email: Optional[str] = None
     username: Optional[str] = None
+    identity: Optional[str] = None
     password: str
 
     @property
-    def identity(self) -> str:
-        return self.email or self.username or ""
+    def resolved_identity(self) -> str:
+        return self.identity or self.email or self.username or ""
+
 
 class RefreshRequest(BaseModel):
     refresh_token: str

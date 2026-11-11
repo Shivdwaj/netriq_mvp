@@ -93,3 +93,5 @@ scripts/validate-*
 scripts/search_repo.*
 scripts/setup_search.*
 
+
+storage/
