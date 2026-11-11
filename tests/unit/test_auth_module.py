@@ -7,7 +7,7 @@ from backend.auth.password import hash_password, verify_password, validate_passw
 from backend.auth.exceptions import WeakPasswordError, TokenExpiredError
 from backend.auth.roles import Role, Capabilities, PERMISSION_MATRIX
 
-class TestAuthModule(unittest.IsolatedAsyncioTestCase):
+class TestAuthModule(unittest.TestCase):
     
     def test_password_hashing(self):
         """Test that passwords hash correctly and verify securely."""
