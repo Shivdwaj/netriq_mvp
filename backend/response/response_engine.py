@@ -294,6 +294,24 @@ class ResponseEngine:
             await self.logger.log_action(action, target_ip, "Bypassed (Whitelisted)", True, context)
             return True
 
+        # Check Autonomous Response Controller (ARC) Safe Mode / Block Suspension
+        blocks_suspended = False
+        try:
+            from backend.self_defense.response_controller import response_controller
+            blocks_suspended = response_controller.are_automated_blocks_suspended()
+        except Exception:
+            blocks_suspended = False
+
+        if action in (Action.RECOMMEND_BLOCK, Action.QUARANTINE) and blocks_suspended:
+            logger.warning(
+                f"[ARC SafeMode] Automated enforcement SUSPENDED for {target_ip} due to active Safe Detection Mode. "
+                f"Downgrading {action.name} to guided analyst review."
+            )
+            outcome_msg = f"Safe Mode (Automated Block Suspended - {action.name})"
+            await self.logger.log_action(action, target_ip, outcome_msg, True, context)
+            asyncio.create_task(self._notify_incident_service(target_ip, prediction, action, False))
+            return True
+
         # Check Passive Detection Posture (auto_quarantine setting)
         auto_quarantine_enabled = False
         try:

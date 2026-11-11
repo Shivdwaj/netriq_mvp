@@ -254,8 +254,40 @@ class IndependentSecurityWatchdog:
                         },
                     )
                     await self.broadcast_alert(intel_alert)
+
+                    # Trigger Autonomous Response Controller (ARC) Fallback
+                    try:
+                        from backend.self_defense.response_controller import response_controller
+                        await response_controller.handle_intelligence_tampering(
+                            iig_verdict=iig_verdict,
+                            source="watchdog.intelligence_guard"
+                        )
+                    except Exception as arc_ex:
+                        logger.error(f"[Watchdog] Failed to trigger ARC on intelligence tampering: {arc_ex}")
             except Exception as iex:
                 logger.error(f"[Watchdog] Error during intelligence integrity sweep: {iex}", exc_info=True)
+
+            # Step 4: Sensor Trust Integrity Sweep (Stage 2 Step 6)
+            try:
+                from backend.database.collections import sensors_repo
+                from backend.self_defense.sensor_trust import sensor_trust_engine
+                from backend.self_defense.response_controller import response_controller
+
+                all_sensors = await sensors_repo.list({}, limit=50)
+                for s in all_sensors:
+                    s_id = s.get("sensor_id")
+                    t_id = s.get("tenant_id", "default")
+                    if s_id:
+                        score_obj = await sensor_trust_engine.get_or_create_trust_score(s_id, t_id)
+                        if score_obj.trust_score < 0.50 and not await response_controller.is_sensor_contained(s_id, t_id):
+                            await response_controller.handle_trust_collapse(
+                                sensor_id=s_id,
+                                tenant_id=t_id,
+                                trust_score=score_obj.trust_score,
+                                reason="Watchdog sweep detected uncontained sensor with collapsed trust score (<0.50)",
+                            )
+            except Exception as swe:
+                logger.debug(f"[Watchdog] Sensor trust sweep note: {swe}")
 
             return result
 

@@ -113,6 +113,10 @@ class AlertCategory(str, Enum):
     ADMIN_ANOMALY = "ADMIN_ANOMALY"
     UNAUTHORIZED_ADMIN_ACTION = "UNAUTHORIZED_ADMIN_ACTION"
     DUAL_APPROVAL_VIOLATION = "DUAL_APPROVAL_VIOLATION"
+    CONTAINMENT_TRIGGERED = "CONTAINMENT_TRIGGERED"
+    CONTAINMENT_RECOVERY = "CONTAINMENT_RECOVERY"
+    SAFE_MODE_ACTIVATED = "SAFE_MODE_ACTIVATED"
+    SAFE_MODE_DEACTIVATED = "SAFE_MODE_DEACTIVATED"
 
 
 class SecurityAlert(BaseModel):
@@ -328,5 +332,65 @@ class DualApprovalRecord(BaseModel):
     used: bool = False
     tenant_id: str = "global"
     details: Dict[str, Any] = Field(default_factory=dict)
+
+
+# ==============================================================================
+# Autonomous Response Controller (ARC) Schemas (Step 6)
+# ==============================================================================
+
+class ContainmentStatus(str, Enum):
+    ACTIVE = "active"
+    QUARANTINED = "quarantined"
+    REVOKED = "revoked"
+    RESTORED = "restored"
+
+
+class ContainmentStage(str, Enum):
+    STAGE_1_QUARANTINE = "STAGE_1_QUARANTINE"
+    STAGE_2_REVOKE = "STAGE_2_REVOKE"
+    RECOVERED = "RECOVERED"
+
+
+class ContainmentRecord(BaseModel):
+    """Immutable audit record and active state of an autonomous containment action."""
+    model_config = ConfigDict(extra="allow")
+
+    record_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    tenant_id: str = Field(default="default")
+    sensor_id: str
+    status: ContainmentStatus = Field(default=ContainmentStatus.ACTIVE)
+    stage: ContainmentStage = Field(default=ContainmentStage.STAGE_1_QUARANTINE)
+    triggered_by: str = Field(default="STE_TRUST_COLLAPSE")
+    trigger_reason: str = Field(default="")
+    trust_score: Optional[float] = None
+    quarantined_at: Optional[float] = None
+    revoked_at: Optional[float] = None
+    restored_at: Optional[float] = None
+    details: Dict[str, Any] = Field(default_factory=dict)
+
+
+class RecoveryRequest(BaseModel):
+    """Explicit authorized request to recover and un-quarantine a contained sensor."""
+    model_config = ConfigDict(extra="allow")
+
+    sensor_id: str
+    tenant_id: str = Field(default="default")
+    approver_id: str
+    new_api_key_hash: Optional[str] = None
+    validation_notes: str = Field(default="")
+    reset_trust_score: float = Field(default=1.0)
+
+
+class RecoveryResult(BaseModel):
+    """Result of an authorized sensor recovery operation."""
+    model_config = ConfigDict(extra="allow")
+
+    success: bool
+    sensor_id: str
+    tenant_id: str
+    restored_at: float = Field(default_factory=get_utc_now_timestamp)
+    message: str
+    trust_score: float = 1.0
+
 
 

@@ -181,6 +181,12 @@ class IntelligenceIntegrityGuard:
             "(Deterministic signature/rule/behaviour detection remains OPERATIONAL)"
         )
 
+    def deactivate_safe_mode(self):
+        """Restores normal operations after authorized model validation."""
+        self.safe_mode_active = False
+        self.safe_mode_reason = None
+        logger.info("[IntelligenceGuard] Safe Detection Mode deactivated. Normal ML inference resumed.")
+
     def deactivate_safe_mode_for_test(self):
         """Helper for test state cleanup."""
         self.safe_mode_active = False

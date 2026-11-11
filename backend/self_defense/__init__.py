@@ -32,6 +32,11 @@ from backend.self_defense.schemas import (
     CanaryTriggerEvent,
     AdminAnomalyType,
     DualApprovalRecord,
+    ContainmentStatus,
+    ContainmentStage,
+    ContainmentRecord,
+    RecoveryRequest,
+    RecoveryResult,
 )
 from backend.self_defense.audit_ledger import (
     CryptographicallySealedAuditLedger,
@@ -80,6 +85,25 @@ from backend.self_defense.management_monitor import (
     AdminAnomalyError,
     DualApprovalRequiredError,
     FailClosedAuditError,
+)
+from backend.self_defense.response_policies import (
+    ContainmentMode,
+    ResponsePolicyEngine,
+    ResponseTriggerType,
+    ResponseActionType,
+    TRUST_COLLAPSE_THRESHOLD,
+    TRUST_WARNING_THRESHOLD,
+)
+from backend.self_defense.containment import (
+    SensorContainmentManager,
+)
+from backend.self_defense.recovery import (
+    SensorRecoveryManager,
+    RecoveryError,
+)
+from backend.self_defense.response_controller import (
+    AutonomousResponseController,
+    response_controller,
 )
 
 __all__ = [
@@ -139,5 +163,21 @@ __all__ = [
     "AdminAnomalyError",
     "DualApprovalRequiredError",
     "FailClosedAuditError",
+    "ContainmentStatus",
+    "ContainmentStage",
+    "ContainmentRecord",
+    "RecoveryRequest",
+    "RecoveryResult",
+    "ContainmentMode",
+    "ResponsePolicyEngine",
+    "ResponseTriggerType",
+    "ResponseActionType",
+    "TRUST_COLLAPSE_THRESHOLD",
+    "TRUST_WARNING_THRESHOLD",
+    "SensorContainmentManager",
+    "SensorRecoveryManager",
+    "RecoveryError",
+    "AutonomousResponseController",
+    "response_controller",
 ]
 

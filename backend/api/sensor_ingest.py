@@ -52,11 +52,11 @@ async def require_sensor_identity(req: Request) -> Dict[str, Any]:
             sensors = await sensors_repo.list(filter_query={"api_key_hash": key_hash}, limit=1)
             if sensors:
                 s = sensors[0]
-                # Reject inactive or revoked sensors
-                if not s.get("is_active", True) or s.get("status") in ("revoked", "deactivated", "disabled"):
+                # Reject inactive, revoked, or quarantined sensors
+                if not s.get("is_active", True) or s.get("status") in ("revoked", "deactivated", "disabled", "quarantined"):
                     raise HTTPException(
                         status_code=status.HTTP_401_UNAUTHORIZED,
-                        detail="Sensor authentication failed: Sensor key has been revoked or deactivated."
+                        detail="Sensor authentication failed: Sensor key has been revoked, deactivated, or quarantined."
                     )
                 auth_user = {
                     "sub": s["sensor_id"],
@@ -84,10 +84,10 @@ async def require_sensor_identity(req: Request) -> Dict[str, Any]:
     if user_role in ("sensor", "sensor_ingest") and sensor_id:
         try:
             s_recs = await sensors_repo.list(filter_query={"sensor_id": sensor_id}, limit=1)
-            if s_recs and (not s_recs[0].get("is_active", True) or s_recs[0].get("status") in ("revoked", "deactivated", "disabled")):
+            if s_recs and (not s_recs[0].get("is_active", True) or s_recs[0].get("status") in ("revoked", "deactivated", "disabled", "quarantined")):
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Sensor authentication failed: Sensor has been revoked or deactivated."
+                    detail="Sensor authentication failed: Sensor has been revoked, deactivated, or quarantined."
                 )
         except HTTPException:
             raise
@@ -507,6 +507,22 @@ async def ingest_suricata_eve(
         filtered_records = _validate_and_filter_records(records, now)
         trust_tag = await _evaluate_sensor_trust_telemetry(req, tenant_id, len(records))
 
+        # Autonomous Response Controller (ARC) Telemetry Quarantine Check
+        try:
+            from backend.self_defense.response_controller import response_controller
+            if await response_controller.is_sensor_quarantined(sensor_id, tenant_id):
+                logger.warning(
+                    f"[SensorIngest] Sensor {sensor_id} in tenant {tenant_id} is quarantined by ARC. "
+                    f"Holding {len(filtered_records)} records in quarantine without publishing to primary EventBus."
+                )
+                return IngestResponse(
+                    status="quarantined",
+                    events_ingested=len(filtered_records),
+                    events_published=0
+                )
+        except Exception as q_err:
+            logger.debug(f"[SensorIngest] Quarantine check note: {q_err}")
+
         published = 0
         for rec in filtered_records:
             event = suricata_adapter.transform(rec)
@@ -565,6 +581,22 @@ async def ingest_zeek_conn(
         filtered_records = _validate_and_filter_records(records, now)
         trust_tag = await _evaluate_sensor_trust_telemetry(req, tenant_id, len(records))
 
+        # Autonomous Response Controller (ARC) Telemetry Quarantine Check
+        try:
+            from backend.self_defense.response_controller import response_controller
+            if await response_controller.is_sensor_quarantined(sensor_id, tenant_id):
+                logger.warning(
+                    f"[SensorIngest] Sensor {sensor_id} in tenant {tenant_id} is quarantined by ARC. "
+                    f"Holding {len(filtered_records)} records in quarantine without publishing to primary EventBus."
+                )
+                return IngestResponse(
+                    status="quarantined",
+                    events_ingested=len(filtered_records),
+                    events_published=0
+                )
+        except Exception as q_err:
+            logger.debug(f"[SensorIngest] Quarantine check note: {q_err}")
+
         published = 0
         for rec in filtered_records:
             event = zeek_adapter.transform(rec)
@@ -622,6 +654,22 @@ async def ingest_zeek_dns(
         now = time.time()
         filtered_records = _validate_and_filter_records(records, now)
         trust_tag = await _evaluate_sensor_trust_telemetry(req, tenant_id, len(records))
+
+        # Autonomous Response Controller (ARC) Telemetry Quarantine Check
+        try:
+            from backend.self_defense.response_controller import response_controller
+            if await response_controller.is_sensor_quarantined(sensor_id, tenant_id):
+                logger.warning(
+                    f"[SensorIngest] Sensor {sensor_id} in tenant {tenant_id} is quarantined by ARC. "
+                    f"Holding {len(filtered_records)} records in quarantine without publishing to primary EventBus."
+                )
+                return IngestResponse(
+                    status="quarantined",
+                    events_ingested=len(filtered_records),
+                    events_published=0
+                )
+        except Exception as q_err:
+            logger.debug(f"[SensorIngest] Quarantine check note: {q_err}")
 
         published = 0
         for rec in filtered_records:
