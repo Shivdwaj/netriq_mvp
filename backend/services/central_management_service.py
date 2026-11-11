@@ -153,6 +153,11 @@ class CentralManagementService:
             return None
 
         sensor = sensors[0]
+        # Active and Revocation Check (Finding 3)
+        if not sensor.get("is_active", True) or sensor.get("status") in ("revoked", "deactivated", "disabled"):
+            logger.warning(f"[CentralManagement] Sensor {sensor_id} authentication failed: inactive or revoked.")
+            return None
+
         expected_hash = sensor.get("api_key_hash", "")
         provided_hash = hashlib.sha256(api_key.encode("utf-8")).hexdigest()
 
@@ -171,6 +176,10 @@ class CentralManagementService:
             raise ValueError(f"Sensor {req.sensor_id} not registered")
 
         sensor = sensors[0]
+        # Reject heartbeats from revoked or deactivated sensors
+        if not sensor.get("is_active", True) or sensor.get("status") in ("revoked", "deactivated", "disabled"):
+            raise PermissionError(f"Sensor {req.sensor_id} has been revoked or deactivated.")
+
         now = time.time()
         now_iso = get_utc_iso_now()
 

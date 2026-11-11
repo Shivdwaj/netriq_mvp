@@ -45,6 +45,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 sensors = await sensors_repo.list(filter_query={"api_key_hash": key_hash}, limit=1)
                 if sensors:
                     s = sensors[0]
+                    if not s.get("is_active", True) or s.get("status") in ("revoked", "deactivated", "disabled"):
+                        return JSONResponse(
+                            status_code=401,
+                            headers={"WWW-Authenticate": "Bearer error=\"invalid_token\""},
+                            content={"error": "Unauthorized", "detail": "Sensor authentication failed: Sensor key has been revoked or deactivated."}
+                        )
                     request.state.user = {
                         "sub": s["sensor_id"],
                         "sensor_id": s["sensor_id"],
@@ -95,6 +101,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 sensors = await sensors_repo.list(filter_query={"api_key_hash": key_hash}, limit=1)
                 if sensors:
                     s = sensors[0]
+                    if not s.get("is_active", True) or s.get("status") in ("revoked", "deactivated", "disabled"):
+                        return JSONResponse(
+                            status_code=401,
+                            headers={"WWW-Authenticate": "Bearer error=\"invalid_token\""},
+                            content={"error": "Unauthorized", "detail": "Sensor authentication failed: Sensor key has been revoked or deactivated."}
+                        )
                     request.state.user = {
                         "sub": s["sensor_id"],
                         "sensor_id": s["sensor_id"],

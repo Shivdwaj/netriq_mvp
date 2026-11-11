@@ -1,6 +1,6 @@
 from enum import Enum
 from typing import List, Dict, Any, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from backend.auth.roles import Role
 
 class EventType(str, Enum):
@@ -15,6 +15,17 @@ class Event(BaseModel):
     event_type: EventType
     target_audience: List[Role]
     payload: Dict[str, Any]
+    tenant_id: Optional[str] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def extract_tenant_id(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if not data.get("tenant_id"):
+                payload = data.get("payload")
+                if isinstance(payload, dict) and payload.get("tenant_id"):
+                    data["tenant_id"] = payload["tenant_id"]
+        return data
 
 class LiveVerdictEvent(Event):
     event_type: EventType = EventType.LIVE_VERDICT

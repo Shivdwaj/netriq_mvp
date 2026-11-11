@@ -112,6 +112,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
         user_id = payload.get("sub")
         role_str = payload.get("role", "viewer")
+        tenant_id = payload.get("tenant_id") or "default"
 
         try:
             role = Role(role_str)
@@ -124,12 +125,12 @@ async def websocket_endpoint(websocket: WebSocket):
         # Release pre-auth slot once authenticated or rejected
         await _release_preauth_slot(client_ip)
 
-    # Register with the canonical role-aware ConnectionManager
-    await manager.connect(user_id, role, websocket)
-    logger.info(f"WebSocket connected: user={user_id} role={role.value} ip={client_ip}")
+    # Register with the canonical role-aware and tenant-isolated ConnectionManager
+    await manager.connect(user_id, role, websocket, tenant_id=tenant_id)
+    logger.info(f"WebSocket connected: user={user_id} role={role.value} tenant={tenant_id} ip={client_ip}")
 
     # Confirm auth success to client
-    await websocket.send_json({"type": "auth_ok", "user_id": user_id, "role": role.value})
+    await websocket.send_json({"type": "auth_ok", "user_id": user_id, "role": role.value, "tenant_id": tenant_id})
 
     last_session_check = time.time()
 
@@ -162,8 +163,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     break
 
     except WebSocketDisconnect:
-        await manager.disconnect(user_id, role, websocket)
+        await manager.disconnect(user_id, role, websocket, tenant_id=tenant_id)
         logger.info(f"WebSocket disconnected: user={user_id}")
     except Exception as e:
         logger.error(f"WebSocket error for user {user_id}: {e}")
-        await manager.disconnect(user_id, role, websocket)
+        await manager.disconnect(user_id, role, websocket, tenant_id=tenant_id)
