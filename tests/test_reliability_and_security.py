@@ -1102,4 +1102,250 @@ async def test_restore_active_incident_association_after_restart():
     assert all_incs[0]["id"] == existing_inc_id
 
 
+@pytest.mark.asyncio
+async def test_threshold_optimizer_empirical_calibration():
+    """
+    Phase 3: Verify ThresholdOptimizer calibrates optimal score thresholds
+    using empirical validation distributions without crashing or hardcoded fallbacks.
+    """
+    from backend.ai.threshold_optimizer import ThresholdOptimizer
+    import numpy as np
+
+    optimizer = ThresholdOptimizer(target_metric="f1")
+
+    # Generate synthetic scores: 50 clean scores around 0.2, 50 malicious around 0.8
+    np.random.seed(42)
+    clean_scores = np.random.normal(loc=0.2, scale=0.1, size=50).tolist()
+    malicious_scores = np.random.normal(loc=0.8, scale=0.1, size=50).tolist()
+
+    val_scores = clean_scores + malicious_scores
+    labels = [0] * 50 + [1] * 50
+
+    result = optimizer.calibrate(val_scores, labels)
+
+    assert result["calibrated"] is True
+    assert 0.3 <= result["optimal_threshold"] <= 0.7
+    assert result["metrics"]["f1_score"] > 0.85
+    assert result["metrics"]["sample_count"] == 100
+    assert result["metrics"]["target_metric"] == "f1"
+
+    # Test edge case: empty or invalid inputs gracefully fall back
+    fallback = optimizer.calibrate([], [])
+    assert fallback["calibrated"] is False
+    assert fallback["optimal_threshold"] == 0.5
+
+
+@pytest.mark.asyncio
+async def test_adapters_observable_telemetry_and_tls_enrichment():
+    """
+    Phase 3: Verify Suricata and Zeek adapters track malformed event telemetry,
+    log warnings, and enrich events with TLS/SSL metadata.
+    """
+    from backend.adapters.suricata_adapter import SuricataAdapter
+    from backend.adapters.zeek_adapter import ZeekAdapter
+
+    suricata = SuricataAdapter()
+    zeek = ZeekAdapter()
+
+    # 1. Suricata malformed JSON handling
+    res1 = suricata.transform("INVALID_NOT_A_JSON")
+    assert res1 is None
+    assert suricata.malformed_count == 1
+    assert suricata.processed_count == 1
+
+    # 2. Suricata TLS metadata enrichment
+    suricata_tls_payload = {
+        "timestamp": "2026-11-11T12:00:00.000Z",
+        "event_type": "alert",
+        "src_ip": "192.168.1.100",
+        "dest_ip": "10.0.0.5",
+        "src_port": 49200,
+        "dest_port": 443,
+        "proto": "TCP",
+        "alert": {
+            "signature": "ET TROJAN Observed Malicious SSL Cert",
+            "category": "A Network Trojan was detected",
+            "severity": 1,
+            "signature_id": 202888
+        },
+        "tls": {
+            "sni": "malicious-c2.evil.com",
+            "version": "TLS 1.3",
+            "subject": "CN=malicious-c2.evil.com",
+            "issuer": "CN=Evil CA",
+            "ja3": "51c64c77e60f3980ebd90973b1b70467"
+        }
+    }
+    evt_suri = suricata.transform(suricata_tls_payload)
+    assert evt_suri is not None
+    assert evt_suri.evidence["tls"]["sni"] == "malicious-c2.evil.com"
+    assert evt_suri.evidence["tls"]["ja3"] == "51c64c77e60f3980ebd90973b1b70467"
+    assert suricata.transformed_count == 1
+    metrics_suri = suricata.get_metrics()
+    assert metrics_suri["processed"] == 2
+    assert metrics_suri["transformed"] == 1
+    assert metrics_suri["malformed"] == 1
+
+    # 3. Zeek malformed string and missing IPs
+    res_z1 = zeek.transform("{bad_json")
+    assert res_z1 is None
+    assert zeek.malformed_count == 1
+
+    res_z2 = zeek.transform({"proto": "tcp"})  # Missing src_ip and dst_ip
+    assert res_z2 is None
+    assert zeek.malformed_count == 2
+
+    # 4. Zeek SSL record and TLS enrichment
+    zeek_ssl_payload = {
+        "ts": 1700000000.0,
+        "uid": "CHfSZ32168zeek",
+        "id.orig_h": "192.168.1.105",
+        "id.resp_h": "10.0.0.25",
+        "id.orig_p": 51234,
+        "id.resp_p": 443,
+        "proto": "tcp",
+        "ssl": {
+            "server_name": "internal-vault.corp.local",
+            "subject": "CN=internal-vault.corp.local",
+            "issuer": "CN=Corp Internal CA",
+            "ja3": "6734f37431670b3ab4292b8f60f29984",
+            "version": "TLSv1.2",
+            "cipher": "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"
+        }
+    }
+    evt_zeek = zeek.transform(zeek_ssl_payload)
+    assert evt_zeek is not None
+    assert evt_zeek.evidence["tls"]["sni"] == "internal-vault.corp.local"
+    assert evt_zeek.evidence["tls"]["ja3"] == "6734f37431670b3ab4292b8f60f29984"
+    assert evt_zeek.evidence["tls"]["cipher"] == "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"
+    assert zeek.transformed_count == 1
+    metrics_zeek = zeek.get_metrics()
+    assert metrics_zeek["processed"] == 3
+    assert metrics_zeek["transformed"] == 1
+    assert metrics_zeek["malformed"] == 2
+
+
+@pytest.mark.asyncio
+async def test_response_engine_mac_verification_and_retry_resilience():
+    """
+    Phase 3: Verify ResponseEngine suppresses Layer 2 quarantine on unverified MACs,
+    resolves MACs via IdentityResolver when possible, and retries on transient adapter errors.
+    """
+    from backend.response.response_engine import ResponseEngine
+    from backend.ai.contracts import Action, PredictionResult, RiskCategory
+    from backend.pipeline.identity_resolver import identity_resolver
+    from unittest.mock import AsyncMock, patch
+
+    engine = ResponseEngine()
+    engine.quarantine.quarantine_device = AsyncMock(return_value=True)
+    engine.firewall.block_ip = AsyncMock(return_value=True)
+
+    pred = PredictionResult(
+        verdict=True,
+        confidence=96.0,
+        risk_category=RiskCategory.HIGH,
+        model_used="BehavioralPipeline",
+        latency_ms=1.5
+    )
+
+    with patch("backend.services.settings_service.settings_service.get_settings", new_callable=AsyncMock, return_value={"auto_quarantine": True}):
+        # 1. Unverified MAC (None / missing) with unmanaged IP -> Quarantine SUPPRESSED
+        suppressed1 = await engine.handle_verdict(
+            prediction=pred,
+            action=Action.QUARANTINE,
+            context={"src_ip": "192.168.1.222", "src_mac": None}
+        )
+        assert suppressed1 is False
+        assert engine.quarantine.quarantine_device.call_count == 0
+
+        # 2. Invalid / broadcast MAC -> Quarantine SUPPRESSED
+        suppressed2 = await engine.handle_verdict(
+            prediction=pred,
+            action=Action.QUARANTINE,
+            context={"src_ip": "192.168.1.222", "src_mac": "ff:ff:ff:ff:ff:ff"}
+        )
+        assert suppressed2 is False
+        assert engine.quarantine.quarantine_device.call_count == 0
+
+        # 3. Unspecified MAC, but target IP IS registered in IdentityResolver -> Resolves & executes quarantine
+        identity_resolver.register_device(
+            ip="192.168.1.88",
+            mac="00:11:22:33:44:88",
+            hostname="workstation-88"
+        )
+        success_resolved = await engine.handle_verdict(
+            prediction=pred,
+            action=Action.QUARANTINE,
+            context={"src_ip": "192.168.1.88"}  # no src_mac in context
+        )
+        assert success_resolved is True
+        assert engine.quarantine.quarantine_device.call_count == 1
+        # Check that quarantine was called with the resolved MAC
+        call_args = engine.quarantine.quarantine_device.call_args[0]
+        assert call_args[0] == "192.168.1.88"
+        assert call_args[1] == "00:11:22:33:44:88"
+
+        # 4. Response Retries: transient error on attempt 1, success on attempt 2
+        call_counter = 0
+        async def flaky_block(ip, reason):
+            nonlocal call_counter
+            call_counter += 1
+            if call_counter == 1:
+                raise ConnectionError("Transient network reset")
+            return True
+
+        engine.firewall.block_ip = AsyncMock(side_effect=flaky_block)
+        retry_success = await engine.handle_verdict(
+            prediction=pred,
+            action=Action.RECOMMEND_BLOCK,
+            context={"src_ip": "198.51.100.44"}
+        )
+        assert retry_success is True
+        assert call_counter == 2  # Succeeded on retry attempt 2
+
+
+@pytest.mark.asyncio
+async def test_localized_forensic_event_explanation():
+    """
+    Phase 3: Verify IncidentExplainer provides localized forensic feature
+    contribution explanations for individual events without requiring SHAP.
+    """
+    from backend.intelligence.explainer import incident_explainer
+    from backend.pipeline.schemas import NormalizedSecurityEvent
+
+    event = NormalizedSecurityEvent(
+        tenant_id="corp_sec",
+        sensor_id="sensor-zeek-01",
+        source_ip="192.168.1.200",
+        destination_ip="192.168.1.10",
+        source_port=49500,
+        destination_port=445,  # Sensitive SMB port
+        protocol="TCP",
+        event_type="connection",
+        severity="HIGH",
+        direction="internal",
+        evidence={
+            "conn_state": "S0",
+            "scan_indicator": True,
+            "tls": {
+                "sni": "auth.corp.local",
+                "ja3": "771f35e521e4c79f3b93b46007f91d75"
+            }
+        }
+    )
+
+    explanation = incident_explainer.explain_event(event)
+
+    assert explanation["event_id"] == event.event_id
+    assert explanation["severity"] == "HIGH"
+    assert "Reconnaissance" in explanation["primary_driver"] or "Scan" in explanation["primary_driver"]
+    assert "destination_port_sensitivity" in explanation["feature_contributions"]
+    assert explanation["feature_contributions"]["destination_port_sensitivity"] >= 0.90
+    assert explanation["feature_contributions"]["reconnaissance_pattern"] >= 0.90
+    assert explanation["feature_contributions"]["tls_metadata_presence"] > 0
+    assert len(explanation["risk_factors"]) >= 2
+    assert "auth.corp.local" in str(explanation["risk_factors"])
+    assert "T1046" in explanation["mitre_technique"]
+
+
 

@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from backend.intelligence.enricher import EnrichedEventContext
 from backend.intelligence.correlator import CorrelatedIncidentState
 from backend.intelligence.risk_engine import RiskAssessmentResult
+from backend.pipeline.schemas import NormalizedSecurityEvent
 
 
 class IncidentExplanation(BaseModel):
@@ -135,3 +136,89 @@ class IncidentExplainer:
             recommended_playbook=playbook,
             mitre_attack_stages=corr_state.attack_chain
         )
+
+    def explain_event(self, event: NormalizedSecurityEvent) -> Dict[str, Any]:
+        """
+        Produces a localized forensic feature contribution explanation for an individual
+        security event without external ML framework dependencies.
+        """
+        evidence = event.evidence or {}
+        contributions: Dict[str, float] = {}
+        risk_factors: List[str] = []
+
+        # 1. Port Sensitivity Contribution
+        sensitive_ports = {445: 0.95, 3389: 0.90, 22: 0.85, 1433: 0.90, 80: 0.40, 443: 0.40, 53: 0.50}
+        port_weight = sensitive_ports.get(event.destination_port, 0.2)
+        contributions["destination_port_sensitivity"] = round(port_weight, 2)
+        if event.destination_port in (445, 3389, 22, 1433):
+            risk_factors.append(f"Targeting critical administration/database port ({event.destination_port})")
+
+        # 2. Reconnaissance / Scanning Signals
+        is_scan = bool(evidence.get("scan_indicator") or evidence.get("conn_state") in ("S0", "SH", "REJ"))
+        contributions["reconnaissance_pattern"] = 0.9 if is_scan else 0.0
+        if is_scan:
+            risk_factors.append(f"Connection state '{evidence.get('conn_state')}' indicates unanswered SYN sweep / port probe")
+
+        # 3. Known Signature / Rule Match
+        has_sig = bool(event.rule_id or evidence.get("signature"))
+        contributions["signature_match"] = 0.85 if has_sig else 0.0
+        if has_sig:
+            sig_name = evidence.get("signature") or event.rule_id
+            risk_factors.append(f"Matched threat detection signature: {sig_name}")
+
+        # 4. Severity Weight
+        sev_map = {"CRITICAL": 1.0, "HIGH": 0.8, "MEDIUM": 0.5, "LOW": 0.2, "INFO": 0.1}
+        sev_score = sev_map.get(str(event.severity).upper(), 0.1)
+        contributions["severity_baseline"] = sev_score
+
+        # 5. Network Directionality
+        direction_map = {"OUTBOUND": 0.7, "INBOUND": 0.6, "INTERNAL": 0.5, "UNKNOWN": 0.3}
+        dir_score = direction_map.get(str(event.direction).upper(), 0.4)
+        contributions["network_direction"] = dir_score
+
+        # 6. TLS Metadata Analysis
+        tls_info = evidence.get("tls")
+        if tls_info and isinstance(tls_info, dict):
+            sni = tls_info.get("sni")
+            ja3 = tls_info.get("ja3")
+            contributions["tls_metadata_presence"] = 0.6
+            if sni:
+                risk_factors.append(f"TLS Client Hello SNI target: {sni}")
+            if ja3:
+                risk_factors.append(f"TLS JA3 client fingerprint: {ja3}")
+        else:
+            contributions["tls_metadata_presence"] = 0.0
+
+        # Primary Driver Determination
+        if has_sig:
+            primary_driver = "Signature Detection Rule"
+        elif is_scan:
+            primary_driver = "Network Reconnaissance / Port Scan"
+        elif event.destination_port in sensitive_ports:
+            primary_driver = "Sensitive Port Access Attempt"
+        else:
+            primary_driver = f"Anomalous {event.protocol} Traffic"
+
+        # Forensic Summary Synthesis
+        summary = (
+            f"Event {event.event_id or 'unknown'} ({event.detection_source}) from "
+            f"{event.source_ip}:{event.source_port} to {event.destination_ip}:{event.destination_port} "
+            f"flagged as {event.severity} severity. Primary driver: {primary_driver}."
+        )
+
+        return {
+            "event_id": event.event_id,
+            "detection_source": event.detection_source,
+            "severity": event.severity,
+            "primary_driver": primary_driver,
+            "forensic_summary": summary,
+            "risk_factors": risk_factors,
+            "feature_contributions": contributions,
+            "mitre_technique": evidence.get("mitre") or ("T1046 Network Service Discovery" if is_scan else None),
+            "evidence": {
+                k: v for k, v in evidence.items() if k not in ("payload", "raw_packet")
+            }
+        }
+
+
+incident_explainer = IncidentExplainer()
