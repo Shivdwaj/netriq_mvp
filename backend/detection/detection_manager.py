@@ -31,6 +31,18 @@ class DetectionManager:
         self.rule_engine = rl_engine or rule_engine
         self.behaviour_engine = beh_engine or behaviour_engine
 
+    @property
+    def is_safe_detection_mode_active(self) -> bool:
+        """
+        Returns True if ML is isolated/disabled due to an integrity violation,
+        with deterministic signature, rule, and behaviour engines actively protecting the network.
+        """
+        try:
+            from backend.self_defense.intelligence_guard import intelligence_guard
+            return intelligence_guard.is_safe_mode_active()
+        except Exception:
+            return False
+
     def evaluate(self, event: NormalizedSecurityEvent) -> List[DetectionFinding]:
         """
         Synchronously passes an event across all three detection engines,

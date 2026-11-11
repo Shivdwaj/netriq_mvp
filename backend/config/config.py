@@ -48,4 +48,18 @@ SNI_MONITORED_PORTS = [
 ]
 
 
+def get_runtime_threshold_snapshot() -> dict:
+    """Returns an immutable snapshot of all active risk and heuristic thresholds."""
+    return {
+        "RISK_LOW_MAX": float(RISK_THRESHOLDS.get("LOW_MAX", 40.0)),
+        "RISK_MEDIUM_MAX": float(RISK_THRESHOLDS.get("MEDIUM_MAX", 70.0)),
+        "RISK_HIGH_MAX": float(RISK_THRESHOLDS.get("HIGH_MAX", 90.0)),
+        "ACTIONABLE_RISK_THRESHOLD": float(ACTIONABLE_RISK_THRESHOLD),
+        "HIGH_ANOMALY_THRESHOLD": float(HIGH_ANOMALY_THRESHOLD),
+        "HEURISTIC_CONFIDENCE_FLOOR": float(HEURISTIC_CONFIDENCE_FLOOR),
+        "HEURISTIC_PACKET_RATE_THRESHOLD": float(HEURISTIC_PACKET_RATE_THRESHOLD),
+    }
+
+
+
 
