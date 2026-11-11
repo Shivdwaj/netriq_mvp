@@ -25,6 +25,7 @@ class SecurityEventBus:
         self._semaphore: Optional[asyncio.Semaphore] = None
         self._active_tasks: Set[asyncio.Task] = set()
         self._dropped_count = 0
+        self._is_closing = False
 
     def _get_semaphore(self) -> asyncio.Semaphore:
         if self._semaphore is None:
@@ -43,11 +44,16 @@ class SecurityEventBus:
     async def publish(self, event: NormalizedSecurityEvent, timeout: float = 2.0) -> bool:
         """
         Publishes an event to all subscribers with bounded concurrency and backpressure.
+        If the bus is shutting down (closing state), immediately rejects publication.
         If active pending tasks reach max_queue_size, waits up to timeout for capacity;
         if capacity is not available within timeout, applies backpressure and drops event.
         Guarantees atomic queue-limit verification and task enrollment under lock.
-        Returns True if dispatched, False if rejected due to backpressure.
+        Returns True if dispatched, False if rejected due to backpressure or closing state.
         """
+        if self._is_closing:
+            logger.warning(f"[SecurityEventBus] Bus is closing. Rejected publication for event {getattr(event, 'event_id', '?')}.")
+            return False
+
         sem = self._get_semaphore()
 
         async def _bounded_dispatch(ev: NormalizedSecurityEvent):
@@ -65,6 +71,8 @@ class SecurityEventBus:
         start_time = time.time()
         while True:
             async with self._lock:
+                if self._is_closing:
+                    return False
                 if len(self._active_tasks) < self.max_queue_size:
                     self._recent_events.append(event)
                     try:
@@ -103,9 +111,14 @@ class SecurityEventBus:
 
     async def shutdown(self, drain_timeout: float = 5.0):
         """
-        Gracefully shuts down event bus by draining in-flight dispatch tasks first,
-        only cancelling remaining tasks if drain timeout is exceeded.
+        Gracefully shuts down event bus:
+        1. Atomically transitions to closing state under lock to reject new incoming publications.
+        2. Awaits completion of existing in-flight dispatch tasks up to drain_timeout.
+        3. Cancels any remaining unfinished tasks that exceeded timeout.
         """
+        async with self._lock:
+            self._is_closing = True
+
         # 1. Attempt graceful drain before forced cancellation
         if self._active_tasks:
             try:

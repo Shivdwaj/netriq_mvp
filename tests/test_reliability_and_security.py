@@ -1387,10 +1387,14 @@ async def test_event_bus_atomic_concurrency_and_graceful_shutdown():
     assert bus.dropped_count == 30
     assert bus.queue_depth <= 10
 
-    # Test graceful shutdown (drains in-flight tasks)
+    # Test graceful shutdown (drains in-flight tasks and sets closing state)
     await bus.shutdown(drain_timeout=2.0)
     assert bus.queue_depth == 0
     assert processed_count == 10
+
+    # Closing state rejects any subsequent publications
+    rejected_post_shutdown = await bus.publish(evt)
+    assert rejected_post_shutdown is False
 
 
 @pytest.mark.asyncio
@@ -1398,6 +1402,7 @@ async def test_multi_tenant_correlation_isolation():
     """
     Verify CorrelationEngine maintains independent trackers for different tenants
     even when RFC1918 private IP addresses overlap (e.g. 10.0.0.99).
+    Also verifies ambiguous raw IP queries raise KeyError when multiple tenants share that IP.
     """
     from backend.services.correlation_service import CorrelationEngine
     from backend.pipeline.schemas import NormalizedSecurityEvent
@@ -1430,11 +1435,11 @@ async def test_multi_tenant_correlation_isolation():
     await engine.process_event(evt_beta)
 
     # Ensure separate trackers exist under composite tenant keys
-    assert "org_alpha:10.0.0.99" in engine._trackers
-    assert "org_beta:10.0.0.99" in engine._trackers
+    assert "tenant:org_alpha/device:10.0.0.99" in engine._trackers
+    assert "tenant:org_beta/device:10.0.0.99" in engine._trackers
 
-    tracker_alpha = engine._trackers["org_alpha:10.0.0.99"]
-    tracker_beta = engine._trackers["org_beta:10.0.0.99"]
+    tracker_alpha = engine._trackers["tenant:org_alpha/device:10.0.0.99"]
+    tracker_beta = engine._trackers["tenant:org_beta/device:10.0.0.99"]
 
     assert tracker_alpha is not tracker_beta
     assert len(tracker_alpha.events) == 1
@@ -1442,12 +1447,17 @@ async def test_multi_tenant_correlation_isolation():
     assert tracker_alpha.events[0]["dst_port"] == 445
     assert tracker_beta.events[0]["dst_port"] == 3389
 
+    # Raw IP query is ambiguous across multiple tenants -> raises KeyError
+    with pytest.raises(KeyError, match="Ambiguous tracker lookup"):
+        _ = engine._trackers["10.0.0.99"]
+
 
 @pytest.mark.asyncio
 async def test_threshold_optimizer_fpr_budget_and_live_risk_engine_application():
     """
     Verify ThresholdOptimizer applies false positive rate constraints,
-    respects target_metric (precision), and applies calibrated thresholds to live RiskEngine.
+    respects target_metric (precision), rejects infeasible FPR budgets,
+    and applies calibrated thresholds to live RiskEngine.
     """
     from backend.ai.threshold_optimizer import ThresholdOptimizer
     from backend.intelligence.config import intelligence_config
@@ -1462,13 +1472,20 @@ async def test_threshold_optimizer_fpr_budget_and_live_risk_engine_application()
     scores = benign + malicious
     labels = [0] * 80 + [1] * 80
 
+    # 1. Feasible FPR budget
     calibrated = optimizer.calibrate(scores, labels, target_false_positive_rate=0.05)
-
     assert calibrated["calibrated"] is True
     assert calibrated["metrics"]["false_positive_rate"] <= 0.05 + 1e-4
     assert calibrated["metrics"]["target_metric"] == "precision"
 
-    # Apply to live RiskEngine with isolated restore
+    # 2. Infeasible FPR budget constraint -> reports infeasible and retains previous
+    overlap_scores = [0.6, 0.7, 0.8, 0.9, 0.1, 0.2, 0.3, 0.4]
+    overlap_labels = [0, 0, 0, 0, 1, 1, 1, 1]
+    infeasible_cal = optimizer.calibrate(overlap_scores, overlap_labels, target_false_positive_rate=0.01)
+    assert infeasible_cal["calibrated"] is False
+    assert infeasible_cal.get("infeasible_constraint") is True
+
+    # 3. Apply to live RiskEngine with isolated restore
     import backend.config.config as global_config
     orig_thresholds = dict(global_config.RISK_THRESHOLDS)
     orig_med = intelligence_config.severity_medium_threshold
@@ -1525,6 +1542,7 @@ async def test_response_engine_mac_spoofing_mismatch_and_idempotent_retry():
     from backend.response.response_engine import ResponseEngine
     from backend.ai.contracts import Action, PredictionResult, RiskCategory
     from backend.pipeline.identity_resolver import identity_resolver
+    from backend.response.exceptions import EnforcementAlreadyActiveError
     from unittest.mock import AsyncMock, patch
 
     engine = ResponseEngine()
@@ -1565,9 +1583,9 @@ async def test_response_engine_mac_spoofing_mismatch_and_idempotent_retry():
         assert legit_result is True
         assert engine.quarantine.quarantine_device.call_count == 1
 
-        # 2. Idempotency test: adapter throws error indicating target already blocked
-        async def already_blocked_action(ip, reason):
-            raise Exception("Rule already exists on firewall: target IP is already blocked")
+        # 2. Idempotency test: adapter throws typed EnforcementAlreadyActiveError
+        async def already_blocked_action(ip, reason, **kwargs):
+            raise EnforcementAlreadyActiveError(f"IP {ip} is already blocked on firewall")
 
         engine.firewall.block_ip = AsyncMock(side_effect=already_blocked_action)
         idempotent_res = await engine.handle_verdict(
@@ -1576,6 +1594,75 @@ async def test_response_engine_mac_spoofing_mismatch_and_idempotent_retry():
             context={"src_ip": "198.51.100.99"}
         )
         assert idempotent_res is True
+
+
+@pytest.mark.asyncio
+async def test_live_risk_engine_dynamic_threshold_recalibration_lifecycle():
+    """
+    Verify that an active, running RiskEngine instance dynamically updates its severity
+    evaluations immediately upon optimizer.apply_to_risk_engine() without requiring server restart.
+    """
+    from backend.intelligence.risk_engine import RiskEngine
+    from backend.intelligence.enricher import EnrichedEventContext
+    from backend.intelligence.behaviour import BehaviourAssessment
+    from backend.intelligence.correlator import CorrelatedIncidentState
+    from backend.ai.threshold_optimizer import ThresholdOptimizer
+    from backend.intelligence.config import intelligence_config
+    import backend.config.config as global_config
+
+    orig_thresholds = dict(global_config.RISK_THRESHOLDS)
+    orig_med = intelligence_config.severity_medium_threshold
+    orig_high = intelligence_config.severity_high_threshold
+    orig_crit = intelligence_config.severity_critical_threshold
+
+    try:
+        # Create an active RiskEngine instance
+        import time
+        engine = RiskEngine()
+        context = EnrichedEventContext(
+            event_id="test-evt-lifecycle-1",
+            timestamp=time.time(),
+            tenant_id="test_org",
+            subject_ip="192.168.1.10",
+            subject_hostname="workstation-1",
+            subject_user="analyst",
+            target_ip="10.0.0.5",
+            asset_criticality_multiplier=1.0
+        )
+        behaviour = BehaviourAssessment(
+            source_ip="192.168.1.10",
+            is_high_frequency=True,
+            connection_rate_per_min=100
+        )
+        corr_state = CorrelatedIncidentState(
+            tracker_key="tenant:test/device:192.168.1.10",
+            observation_count=1
+        )
+        raw_events = [{"source": "suricata", "dst_port": 80}]
+
+        # 1. Baseline assessment under default thresholds (High=40.0)
+        res1 = engine.assess_risk(context, behaviour, corr_state, raw_events)
+        assert res1.severity_score == 35.0  # (30 sig + (20 * 0.25) freq dampening)
+        # 35.0 is >= 20.0 (medium) and < 40.0 (high) -> MEDIUM
+        assert res1.severity_label == "MEDIUM"
+
+        # 2. Optimize thresholds so that HIGH boundary becomes 30.0
+        optimizer = ThresholdOptimizer(current_thresholds={"LOW_MAX": 15.0, "MEDIUM_MAX": 30.0, "HIGH_MAX": 60.0})
+        optimizer.apply_to_risk_engine()
+        assert intelligence_config.severity_high_threshold == 30.0
+
+        # 3. Assess again on the SAME live engine instance
+        res2 = engine.assess_risk(context, behaviour, corr_state, raw_events)
+        assert res2.severity_score == 35.0
+        # Under new calibrated threshold (HIGH=30.0), 35.0 is dynamically rated HIGH!
+        assert res2.severity_label == "HIGH"
+
+    finally:
+        global_config.RISK_THRESHOLDS.clear()
+        global_config.RISK_THRESHOLDS.update(orig_thresholds)
+        intelligence_config.severity_medium_threshold = orig_med
+        intelligence_config.severity_high_threshold = orig_high
+        intelligence_config.severity_critical_threshold = orig_crit
 
 
 

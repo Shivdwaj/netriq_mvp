@@ -51,32 +51,36 @@ class DeviceActivityTracker:
 
 class MultiTenantTrackerMap(dict):
     """
-    Registry for device activity trackers partitioned by tenant_id:device_ip composite keys.
-    Provides transparent backward-compatible fallback lookups for raw device_ip queries in tests.
+    Registry for device activity trackers partitioned by tenant and device keys.
+    Legacy lookups by raw device key are reserved for unit test assertions,
+    preventing ambiguous cross-tenant bleed if multiple tenants share an IP.
     """
     def __getitem__(self, key: str):
         if super().__contains__(key):
             return super().__getitem__(key)
-        for k, v in self.items():
-            if k.endswith(f":{key}") or k == key:
-                return v
+        # Legacy test lookup by raw device_key
+        matches = [v for k, v in self.items() if k.endswith(f"/device:{key}") or k == key]
+        if len(matches) == 1:
+            return matches[0]
+        elif len(matches) > 1:
+            raise KeyError(f"Ambiguous tracker lookup: multiple tenants share device '{key}'. Use composite key.")
         raise KeyError(key)
 
     def get(self, key: str, default=None):
         if super().__contains__(key):
             return super().get(key, default)
-        for k, v in self.items():
-            if k.endswith(f":{key}") or k == key:
-                return v
+        matches = [v for k, v in self.items() if k.endswith(f"/device:{key}") or k == key]
+        if len(matches) == 1:
+            return matches[0]
+        elif len(matches) > 1:
+            logger.warning(f"[MultiTenantTrackerMap] Ambiguous get() for raw device '{key}' across {len(matches)} tenants. Returning default.")
+            return default
         return default
 
     def __contains__(self, key: str) -> bool:
         if super().__contains__(key):
             return True
-        for k in self.keys():
-            if k.endswith(f":{key}") or k == key:
-                return True
-        return False
+        return any(k.endswith(f"/device:{key}") or k == key for k in self.keys())
 
 
 class CorrelationEngine:
@@ -102,22 +106,22 @@ class CorrelationEngine:
         self.risk_engine = RiskEngine(self.config)
         self.explainer = IncidentExplainer()
 
-    def _make_composite_key(self, device_ip: str, tenant_id: Optional[str] = None) -> str:
+    def _make_composite_key(self, tenant_id: Optional[str], device_key: str) -> str:
         tid = tenant_id or "default"
-        return f"{tid}:{device_ip}"
+        return f"tenant:{tid}/device:{device_key}"
 
-    async def _get_tracker(self, key: str, tenant_id: Optional[str] = None) -> DeviceActivityTracker:
+    async def _get_tracker(self, device_key: str, tenant_id: Optional[str] = None) -> DeviceActivityTracker:
+        """
+        Retrieves or initializes a device activity tracker using explicit tenant_id and device_key.
+        Avoids unsafe delimiter-splitting assumptions on device keys (e.g. IPv6 addresses).
+        """
         now = time.time()
-        if ":" in key:
-            composite_key = key
-            raw_ip = key.split(":", 1)[1]
-        else:
-            raw_ip = key
-            composite_key = self._make_composite_key(key, tenant_id)
+        tid = tenant_id or "default"
+        composite_key = self._make_composite_key(tid, device_key)
 
         if composite_key not in self._trackers:
             tracker = DeviceActivityTracker(composite_key, self.window_seconds)
-            await self._restore_active_incident(tracker, raw_ip, tenant_id)
+            await self._restore_active_incident(tracker, device_key, tid)
             self._trackers[composite_key] = tracker
         tracker = self._trackers[composite_key]
         tracker.prune(now)

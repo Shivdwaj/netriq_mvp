@@ -119,7 +119,31 @@ class ThresholdOptimizer:
             c for c in evaluated_candidates
             if c["fpr"] <= target_false_positive_rate + 1e-4
         ]
-        pool = valid_candidates if valid_candidates else evaluated_candidates
+
+        if not valid_candidates:
+            min_achieved_fpr = float(min(c["fpr"] for c in evaluated_candidates))
+            logger.warning(
+                f"[ThresholdOptimizer] Infeasible FPR budget: no candidate threshold satisfied FPR <= {target_false_positive_rate:.4f}. "
+                f"Lowest achieved FPR was {min_achieved_fpr:.4f}. Retaining current thresholds without calibration."
+            )
+            res = dict(self.thresholds)
+            res.update({
+                "calibrated": False,
+                "infeasible_constraint": True,
+                "optimal_threshold": float(np.median(scores)),
+                "metrics": {
+                    "f1_score": 0.0,
+                    "precision": 0.0,
+                    "recall": 0.0,
+                    "false_positive_rate": min_achieved_fpr,
+                    "sample_count": len(validation_scores),
+                    "target_metric": self.target_metric,
+                    "target_false_positive_rate": target_false_positive_rate
+                }
+            })
+            return res
+
+        pool = valid_candidates
 
         # Select candidate threshold that maximizes target_metric within FPR budget
         best_cand = max(pool, key=lambda c: (c["metric_val"], -c["fpr"]))
