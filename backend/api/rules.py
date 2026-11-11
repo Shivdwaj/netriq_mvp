@@ -7,6 +7,11 @@ from backend.utils.logger import get_logger
 from backend.auth.roles import Role, Capabilities
 from backend.auth.permissions import require_permission
 from backend.services.central_management_service import central_management_service
+from backend.self_defense.management_monitor import (
+    management_monitor,
+    ManagementSecurityError,
+    FailClosedAuditError,
+)
 
 logger = get_logger(__name__)
 
@@ -194,7 +199,7 @@ class RuleUpdateReq(BaseModel):
     action: Optional[str] = None
     severity: Optional[str] = None
 
-@router.get("")
+@router.get("", dependencies=[Depends(require_permission(Capabilities.VIEW_DETECTION_RULES))])
 async def get_detection_rules(req: Request):
     """
     Returns full detection rule library:
@@ -229,36 +234,86 @@ async def get_detection_rules(req: Request):
         "behaviour_baselines": DEFAULT_RULES["behaviour_baselines"]
     }
 
-@router.put("/{rule_id}")
+@router.put("/{rule_id}", dependencies=[Depends(require_permission(Capabilities.MANAGE_DETECTION_RULES))])
 async def update_detection_rule(rule_id: str, payload: RuleUpdateReq, req: Request):
-    """Updates rule configuration or toggle status."""
+    """Updates rule configuration or toggle status with mandatory fail-closed audit enforcement."""
+    actor = getattr(req.state, "user", {}) or {}
+    actor_id = actor.get("sub") or actor.get("email") or "admin"
+    tenant_id = actor.get("tenant_id", "default")
+
+    # Management Security Monitor Anomaly & Rate Check
+    try:
+        management_monitor.check_admin_rate_limits(actor_id=actor_id, action="UPDATE_DETECTION_RULE", tenant_id=tenant_id)
+    except ManagementSecurityError as mse:
+        raise HTTPException(status_code=mse.status_code, detail=str(mse))
+
+    # Check rule exists before audit
+    target_rule = None
     for category in ["suricata_signatures", "netriq_heuristics", "behaviour_baselines"]:
-        rules_list: List[Dict[str, Any]] = DEFAULT_RULES.get(category, [])
-        for rule in rules_list:
+        for rule in DEFAULT_RULES.get(category, []):
             if rule["id"] == rule_id:
-                if payload.enabled is not None:
-                    rule["enabled"] = payload.enabled
-                if payload.threshold is not None:
-                    rule["threshold"] = payload.threshold
-                if payload.action is not None:
-                    rule["action"] = payload.action
-                if payload.severity is not None:
-                    rule["severity"] = payload.severity
-                logger.info(f"[RulesAPI] Rule {rule_id} updated: {payload.model_dump(exclude_none=True)}")
-                return {"message": f"Rule {rule_id} updated successfully", "rule": rule}
+                target_rule = rule
+                break
+        if target_rule:
+            break
 
-    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Rule {rule_id} not found")
+    if not target_rule:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Rule {rule_id} not found")
 
-@router.post("/distribute")
+    # Mandatory Sealed Audit Enforcement: MUST succeed before mutating rule state (Fail-Closed)
+    try:
+        await management_monitor.enforce_mutation_audit(
+            action="UPDATE_DETECTION_RULE",
+            actor=actor,
+            resource_type="detection_rule",
+            resource_id=rule_id,
+            details={"rule_id": rule_id, "updates": payload.model_dump(exclude_none=True)},
+            tenant_id=tenant_id
+        )
+    except FailClosedAuditError as fce:
+        raise HTTPException(status_code=fce.status_code, detail=str(fce))
+
+    # Apply mutation to rule state
+    if payload.enabled is not None:
+        target_rule["enabled"] = payload.enabled
+    if payload.threshold is not None:
+        target_rule["threshold"] = payload.threshold
+    if payload.action is not None:
+        target_rule["action"] = payload.action
+    if payload.severity is not None:
+        target_rule["severity"] = payload.severity
+
+    logger.info(f"[RulesAPI] Rule {rule_id} updated by {actor_id}: {payload.model_dump(exclude_none=True)}")
+    return {"message": f"Rule {rule_id} updated successfully", "rule": target_rule}
+
+@router.post("/distribute", dependencies=[Depends(require_permission(Capabilities.MANAGE_DETECTION_RULES))])
 async def distribute_ruleset_to_sensors(req: Request):
     """Compiles the latest rule manifest and dispatches rule updates to all registered software sensors."""
-    user = getattr(req.state, "user", None)
-    if isinstance(user, dict) and user.get("tenant_id") and user.get("tenant_id") != "global":
-        tenant_id = user.get("tenant_id")
-    else:
-        tenant_id = req.headers.get("X-Tenant-ID", "default")
+    actor = getattr(req.state, "user", {}) or {}
+    actor_id = actor.get("sub") or actor.get("email") or "admin"
+    tenant_id = actor.get("tenant_id", "default")
+
+    # Management Security Monitor Anomaly & Rate Check
+    try:
+        management_monitor.check_admin_rate_limits(actor_id=actor_id, action="DISTRIBUTE_RULESET", tenant_id=tenant_id)
+    except ManagementSecurityError as mse:
+        raise HTTPException(status_code=mse.status_code, detail=str(mse))
+
     manifest = await central_management_service.get_rule_manifest(tenant_id)
     sensors = await central_management_service.list_software_sensors(tenant_id)
+
+    # Mandatory Sealed Audit Enforcement: MUST succeed before confirming distribution
+    try:
+        await management_monitor.enforce_mutation_audit(
+            action="DISTRIBUTE_RULESET",
+            actor=actor,
+            resource_type="ruleset_distribution",
+            resource_id=manifest.version,
+            details={"tenant_id": tenant_id, "sensors_count": len(sensors)},
+            tenant_id=tenant_id
+        )
+    except FailClosedAuditError as fce:
+        raise HTTPException(status_code=fce.status_code, detail=str(fce))
     
     return {
         "status": "success",
