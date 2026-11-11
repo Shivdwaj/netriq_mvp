@@ -112,6 +112,8 @@ class CentralManagementService:
             "environment": req.environment,
             "api_key_hash": key_hash,
             "status": SensorHealthStatus.HEALTHY.value,
+            "trust_score": 1.0,
+            "trust_tier": "trusted",
             "last_heartbeat": now,
             "last_heartbeat_iso": get_utc_iso_now(),
             "cpu_usage_pct": 0.0,
@@ -191,10 +193,23 @@ class CentralManagementService:
         else:
             status = SensorHealthStatus.HEALTHY.value
 
+        # Stage 2: Evaluate continuous Sensor Trust
+        tenant_id = sensor.get("tenant_id", "default")
+        from backend.self_defense.sensor_trust import sensor_trust_engine
+        reported_ts = getattr(req, "timestamp", None)
+        trust_state = await sensor_trust_engine.evaluate_heartbeat(
+            sensor_id=req.sensor_id,
+            tenant_id=tenant_id,
+            heartbeat_data=req.model_dump(),
+            reported_timestamp=reported_ts,
+        )
+
         updates: Dict[str, Any] = {
             "last_heartbeat": now,
             "last_heartbeat_iso": now_iso,
             "status": status,
+            "trust_score": trust_state.trust_score,
+            "trust_tier": trust_state.trust_tier.value,
             "cpu_usage_pct": req.cpu_usage_pct,
             "memory_usage_mb": req.memory_usage_mb,
             "kernel_drops_count": req.kernel_drops_count,
@@ -214,7 +229,13 @@ class CentralManagementService:
             {"$set": updates}
         )
 
-        return {"status": "success", "sensor_status": status, "timestamp": now_iso}
+        return {
+            "status": "success",
+            "sensor_status": status,
+            "trust_score": trust_state.trust_score,
+            "trust_tier": trust_state.trust_tier.value,
+            "timestamp": now_iso
+        }
 
     async def list_software_sensors(self, tenant_id: str) -> List[Dict[str, Any]]:
         """Lists all software sensors scoped strictly to a tenant's organisation."""

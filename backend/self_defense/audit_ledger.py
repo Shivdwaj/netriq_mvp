@@ -36,7 +36,21 @@ logger = get_logger(__name__)
 GENESIS_HASH = "0" * 64
 
 # Configurable signing key (isolated from standard JWT secret)
-_default_audit_key = os.getenv("NETRIQ_AUDIT_SIGNING_KEY", "netriq_audit_isolated_signing_secret_key_2026!")
+_env_name = os.getenv("ENVIRONMENT", os.getenv("ENV", "development")).lower()
+_is_prod = _env_name in ("production", "prod")
+_raw_audit_key = os.getenv("NETRIQ_AUDIT_SIGNING_KEY")
+
+if not _raw_audit_key:
+    if _is_prod:
+        raise RuntimeError(
+            "FATAL SECURITY ERROR: NETRIQ_AUDIT_SIGNING_KEY must be explicitly configured via environment variable in production. "
+            "Startup aborted to prevent audit forgery."
+        )
+    _default_audit_key = "netriq_audit_isolated_signing_secret_key_2026!"
+    logger.warning("SECURITY WARNING: NETRIQ_AUDIT_SIGNING_KEY not set. Using local development fallback key.")
+else:
+    _default_audit_key = _raw_audit_key
+
 _default_anchor_file = os.getenv("NETRIQ_AUDIT_ANCHOR_FILE", "storage/audit_anchors.jsonl")
 _default_anchor_freq = int(os.getenv("NETRIQ_AUDIT_ANCHOR_FREQUENCY", "10"))
 

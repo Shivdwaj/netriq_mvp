@@ -451,6 +451,21 @@ def _validate_and_filter_records(
         valid.append(rec)
     return valid
 
+async def _evaluate_sensor_trust_telemetry(req: Request, tenant_id: str, count: int) -> Optional[str]:
+    """Evaluates telemetry volume in SensorTrustEngine and returns trust tier tag if suspicious or untrusted."""
+    try:
+        auth_user = getattr(req.state, "user", None)
+        if isinstance(auth_user, dict):
+            sensor_id = auth_user.get("sensor_id") or auth_user.get("sub")
+            if sensor_id and tenant_id:
+                from backend.self_defense.sensor_trust import sensor_trust_engine
+                t_score = await sensor_trust_engine.record_telemetry_batch(sensor_id, tenant_id, count)
+                if t_score.trust_tier.value in ("suspicious", "untrusted"):
+                    return t_score.trust_tier.value
+    except Exception as e:
+        logger.warning(f"[SensorIngest] Could not track telemetry in SensorTrustEngine: {e}")
+    return None
+
 @router.post("/suricata/eve", response_model=IngestResponse, dependencies=[Depends(require_sensor_identity)])
 async def ingest_suricata_eve(
     payload: Union[Dict[str, Any], List[Dict[str, Any]]],
@@ -471,12 +486,15 @@ async def ingest_suricata_eve(
         tenant_id = _get_request_tenant(req)
         now = time.time()
         filtered_records = _validate_and_filter_records(records, now)
+        trust_tag = await _evaluate_sensor_trust_telemetry(req, tenant_id, len(records))
 
         published = 0
         for rec in filtered_records:
             event = suricata_adapter.transform(rec)
             if event:
                 event.tenant_id = tenant_id
+                if trust_tag and hasattr(event, "evidence") and isinstance(event.evidence, dict):
+                    event.evidence["sensor_trust_tier"] = trust_tag
                 await event_bus.publish(event)
                 published += 1
 
@@ -511,12 +529,15 @@ async def ingest_zeek_conn(
         tenant_id = _get_request_tenant(req)
         now = time.time()
         filtered_records = _validate_and_filter_records(records, now)
+        trust_tag = await _evaluate_sensor_trust_telemetry(req, tenant_id, len(records))
 
         published = 0
         for rec in filtered_records:
             event = zeek_adapter.transform(rec)
             if event:
                 event.tenant_id = tenant_id
+                if trust_tag and hasattr(event, "evidence") and isinstance(event.evidence, dict):
+                    event.evidence["sensor_trust_tier"] = trust_tag
                 await event_bus.publish(event)
                 published += 1
 
@@ -551,12 +572,15 @@ async def ingest_zeek_dns(
         tenant_id = _get_request_tenant(req)
         now = time.time()
         filtered_records = _validate_and_filter_records(records, now)
+        trust_tag = await _evaluate_sensor_trust_telemetry(req, tenant_id, len(records))
 
         published = 0
         for rec in filtered_records:
             event = zeek_adapter.transform(rec)
             if event:
                 event.tenant_id = tenant_id
+                if trust_tag and hasattr(event, "evidence") and isinstance(event.evidence, dict):
+                    event.evidence["sensor_trust_tier"] = trust_tag
                 await event_bus.publish(event)
                 published += 1
 

@@ -122,3 +122,53 @@ class SecurityAlert(BaseModel):
     message: str = Field(..., description="Human-readable alert summary")
     details: Dict[str, Any] = Field(default_factory=dict, description="Forensic details (sequence, diffs, hashes)")
 
+
+# ==============================================================================
+# Sensor Trust Engine Schemas (Step 2)
+# ==============================================================================
+
+class TrustTier(str, Enum):
+    TRUSTED = "trusted"          # 0.80 - 1.00: Normal execution
+    SUSPICIOUS = "suspicious"    # 0.50 - 0.79: Tagged telemetry, human review
+    UNTRUSTED = "untrusted"      # < 0.50: Flagged for containment
+
+
+class SensorAnomalyType(str, Enum):
+    HEARTBEAT_JITTER = "HEARTBEAT_JITTER"
+    MISSED_HEARTBEAT = "MISSED_HEARTBEAT"
+    CLOCK_DRIFT = "CLOCK_DRIFT"
+    VOLUME_SPIKE = "VOLUME_SPIKE"
+    VOLUME_DROP = "VOLUME_DROP"
+    INVALID_REPORT = "INVALID_REPORT"
+    PEER_CONTRADICTION = "PEER_CONTRADICTION"
+
+
+class SensorAnomalyEvent(BaseModel):
+    """Specific anomaly observation recorded during trust evaluation."""
+    model_config = ConfigDict(extra="allow")
+
+    anomaly_type: SensorAnomalyType
+    penalty: float
+    description: str
+    timestamp: float = Field(default_factory=get_utc_now_timestamp)
+    timestamp_iso: str = Field(default_factory=get_utc_now_iso)
+    details: Dict[str, Any] = Field(default_factory=dict)
+
+
+class SensorTrustScore(BaseModel):
+    """Complete trust evaluation state for an edge sensor."""
+    model_config = ConfigDict(extra="allow")
+
+    sensor_id: str
+    tenant_id: str
+    trust_score: float = Field(default=1.0, ge=0.0, le=1.0)
+    trust_tier: TrustTier = Field(default=TrustTier.TRUSTED)
+    observation_count: int = Field(default=0)
+    consecutive_healthy: int = Field(default=0)
+    last_heartbeat_timestamp: Optional[float] = None
+    heartbeat_intervals: List[float] = Field(default_factory=list)
+    recent_anomalies: List[SensorAnomalyEvent] = Field(default_factory=list)
+    updated_at: float = Field(default_factory=get_utc_now_timestamp)
+    updated_at_iso: str = Field(default_factory=get_utc_now_iso)
+
+
