@@ -18,15 +18,25 @@ async def health_check():
     """
     Public health check endpoint.
     Aggregates status of DB, model manager, live sniffer, and host OS hardware metrics.
+    Accurately identifies MongoDB vs volatile in-memory fallback, reporting degraded when MongoDB is offline.
     """
-    db_ok = await DatabaseManager.health_check()
+    db_persistent_ok = await DatabaseManager.health_check()
+    is_in_memory = DatabaseManager.is_in_memory()
     mon_status = monitoring_service.get_status()
     monitor_online = mon_status.get("is_running", False)
     
     mm = ModelManager()
     models_ready = bool(mm._models)
 
-    overall = "healthy" if (db_ok and models_ready) else "degraded"
+    if db_persistent_ok:
+        db_component_status = "online"
+    elif is_in_memory:
+        db_component_status = "degraded (in-memory fallback)"
+    else:
+        db_component_status = "offline"
+
+    # Overall status: degraded if database is in-memory or offline, or models not ready
+    overall = "healthy" if (db_persistent_ok and models_ready) else "degraded"
 
     host_info = {
         "os": f"{platform.system()} {platform.release()}",
@@ -56,7 +66,9 @@ async def health_check():
     return {
         "status": overall,
         "components": {
-            "database": "online" if db_ok else "offline",
+            "database": db_component_status,
+            "database_persistent": db_persistent_ok,
+            "database_storage": "mongodb" if db_persistent_ok else ("in-memory" if is_in_memory else "none"),
             "model_manager": "online" if models_ready else "initializing",
             "live_monitor": "running" if monitor_online else "stopped"
         },

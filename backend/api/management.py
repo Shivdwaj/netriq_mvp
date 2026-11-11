@@ -173,6 +173,13 @@ async def record_sensor_heartbeat(
             detail="Invalid or unauthorized sensor API key."
         )
 
+    # Bind authenticated sensor ID to the submitted sensor ID
+    if auth_sensor.get("sensor_id") != body.sensor_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Sensor identity mismatch: Authenticated sensor key does not match submitted sensor_id '{body.sensor_id}'."
+        )
+
     try:
         return await central_management_service.record_sensor_heartbeat(body)
     except HTTPException:

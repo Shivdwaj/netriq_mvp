@@ -1,4 +1,9 @@
 from typing import List, Dict, Any, Union, Optional
+import os
+import hashlib
+import time
+import json
+from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Request, Header, status
 from pydantic import BaseModel
 
@@ -15,10 +20,6 @@ from backend.schemas.management import (
     SensorItem
 )
 from backend.database.collections import sensors_repo
-import hashlib
-import time
-import json
-from datetime import datetime
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/sensors", tags=["sensors"])
@@ -75,11 +76,45 @@ async def require_sensor_identity(req: Request) -> Dict[str, Any]:
     return auth_user
 
 def _get_request_tenant(req: Request) -> str:
-    """Extracts tenant_id from authenticated token/key or X-Tenant-ID header."""
+    """
+    Extracts and strictly isolates tenant_id.
+    Prevents cross-tenant parameter tampering:
+    - Normal users/analysts are strictly confined to their assigned token tenant_id.
+    - Only Role.ADMIN can specify an arbitrary X-Tenant-ID header.
+    """
     auth_user = getattr(req.state, "user", None)
-    if isinstance(auth_user, dict) and auth_user.get("tenant_id"):
-        return auth_user.get("tenant_id")
-    return req.headers.get("X-Tenant-ID", "default")
+    role = get_request_role(req)
+
+    # 1. Authenticated user identity on request state
+    if isinstance(auth_user, dict):
+        user_tenant = auth_user.get("tenant_id") or "default"
+        if role == Role.ADMIN:
+            return req.headers.get("X-Tenant-ID") or user_tenant
+        header_tenant = req.headers.get("X-Tenant-ID")
+        if header_tenant and header_tenant != user_tenant:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Cross-tenant access prohibited: User belongs to '{user_tenant}'."
+            )
+        return user_tenant
+
+    # 2. Authenticated sensor identity on request state
+    auth_sensor = getattr(req.state, "sensor", None)
+    if isinstance(auth_sensor, dict) and auth_sensor.get("tenant_id"):
+        return auth_sensor["tenant_id"]
+
+    # 3. Fallback in test/dev environment if explicitly testing
+    if os.getenv("TESTING", "").lower() == "true":
+        return req.headers.get("X-Tenant-ID", "default")
+
+    # Unauthenticated caller attempting to supply arbitrary tenant
+    header_tenant = req.headers.get("X-Tenant-ID")
+    if header_tenant:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required to access organization resources."
+        )
+    return "default"
 
 def _get_request_user(req: Request) -> str:
     """Extracts username or identity from request auth state."""
@@ -94,16 +129,45 @@ def _get_request_user(req: Request) -> str:
 # --- Sensor Registration & Health (A. Local sensor -> Central platform) ---
 
 @router.post("/register", response_model=SensorRegistrationResponse)
-async def register_sensor(body: SensorRegistrationReq, req: Request):
+async def register_sensor(
+    body: SensorRegistrationReq,
+    req: Request,
+    x_registration_token: Optional[str] = Header(None, alias="X-Registration-Token")
+):
     """
     Registers a software sensor daemon (Suricata, Zeek, or NetrIQ Collector).
     Returns sensor credentials (api_key and sensor_token) for subsequent ingestion authentication.
+    Requires:
+    - Authenticated user session (Role.ADMIN or tenant-authorized analyst), OR
+    - Valid X-Registration-Token matching configured SENSOR_REGISTRATION_TOKEN, OR
+    - Explicit test environment (TESTING=true).
     """
+    auth_user = getattr(req.state, "user", None)
+    role = get_request_role(req)
+    is_testing = os.getenv("TESTING", "").lower() == "true"
+    configured_reg_token = os.getenv("SENSOR_REGISTRATION_TOKEN")
+
+    has_valid_reg_token = bool(configured_reg_token and x_registration_token == configured_reg_token)
+
+    if not is_testing and not has_valid_reg_token:
+        if not auth_user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication required to register software sensors."
+            )
+        if role != Role.ADMIN:
+            user_tenant = auth_user.get("tenant_id")
+            if user_tenant and user_tenant != body.tenant_id:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Cannot register software sensor for a foreign organisation."
+                )
+
     try:
-        # If caller is an authenticated user, inherit their tenant_id
-        auth_user = getattr(req.state, "user", None)
+        # If caller is an authenticated user, inherit their tenant_id if not explicitly specified
         if isinstance(auth_user, dict) and auth_user.get("tenant_id") and auth_user.get("tenant_id") != "global":
-            body.tenant_id = auth_user.get("tenant_id")
+            if role != Role.ADMIN or not body.tenant_id or body.tenant_id == "default":
+                body.tenant_id = auth_user.get("tenant_id")
 
         resp = await central_management_service.register_software_sensor(body)
         return resp
@@ -121,15 +185,56 @@ async def report_sensor_heartbeat(
     """
     Reports periodic heartbeat telemetry from a running software daemon.
     Monitors CPU %, RAM usage, software packet drops (kernel_drops), and uptime.
+    Requires valid sensor authentication via X-Sensor-Key or Bearer token,
+    and enforces strict identity binding between key and sensor_id.
     """
-    try:
-        # Validate authentication if key is provided or present in state
-        auth_user = getattr(req.state, "user", None)
-        if not auth_user and x_sensor_key:
-            auth_sensor = await central_management_service.authenticate_sensor(body.sensor_id, x_sensor_key)
-            if not auth_sensor:
-                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid sensor API key")
+    auth_user = getattr(req.state, "user", None)
+    auth_sensor = None
 
+    # 1. Authenticate via X-Sensor-Key header if provided
+    if x_sensor_key:
+        auth_sensor = await central_management_service.authenticate_sensor(body.sensor_id, x_sensor_key)
+        if not auth_sensor:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or unauthorized sensor API key."
+            )
+        # Bind authenticated sensor ID to the submitted sensor ID
+        if auth_sensor.get("sensor_id") != body.sensor_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Sensor identity mismatch: Authenticated sensor key does not match submitted sensor_id '{body.sensor_id}'."
+            )
+
+    # 2. Or authenticate via Bearer token (present on req.state.user)
+    elif auth_user:
+        role = auth_user.get("role")
+        auth_sensor_id = auth_user.get("sensor_id") or auth_user.get("sub")
+        # If the authenticated identity is a sensor, ensure it matches body.sensor_id
+        if role in ("sensor", "sensor_ingest") and auth_sensor_id and auth_sensor_id != body.sensor_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Sensor identity mismatch: Authenticated sensor '{auth_sensor_id}' cannot report heartbeat for '{body.sensor_id}'."
+            )
+
+    # 3. Neither X-Sensor-Key nor Bearer authentication present
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing required sensor authentication key (X-Sensor-Key or Bearer token)."
+        )
+
+    # 4. Enforce tenant isolation if user/sensor is not an administrator
+    sensor_tenant = (auth_sensor.get("tenant_id") if auth_sensor else None) or (auth_user.get("tenant_id") if isinstance(auth_user, dict) else None)
+    header_tenant = req.headers.get("X-Tenant-ID")
+    caller_role = get_request_role(req)
+    if caller_role != Role.ADMIN and header_tenant and sensor_tenant and header_tenant != sensor_tenant:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Cross-tenant access prohibited: Sensor belongs to tenant '{sensor_tenant}'."
+        )
+
+    try:
         return await central_management_service.record_sensor_heartbeat(body)
     except HTTPException:
         raise

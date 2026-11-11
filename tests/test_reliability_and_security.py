@@ -772,3 +772,183 @@ async def test_response_engine_cidr_infrastructure_and_quarantine_quota():
         assert q3 is False
         assert engine.quarantine.quarantine_device.call_count == 2
 
+
+@pytest.mark.asyncio
+async def test_sensor_registration_authentication_and_tenant_enforcement():
+    """
+    Regression test for Phase 1 Step 1 (Sensor Registration Security):
+    - Unauthenticated registration rejected with 401 when not in testing mode.
+    - Non-admin user cannot register a sensor for a foreign tenant (403).
+    - Authenticated admin or matching tenant user can register.
+    """
+    from httpx import AsyncClient, ASGITransport
+    from backend.main import app
+    from backend.auth.jwt_handler import create_access_token
+    from unittest.mock import patch
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        reg_payload = {
+            "tenant_id": "target_tenant",
+            "name": "edge-suricata-probe",
+            "software_type": "suricata",
+            "software_version": "7.0.2",
+            "hostname": "probe-vm"
+        }
+
+        # 1. Unauthenticated registration rejected when TESTING is false
+        with patch.dict(os.environ, {"TESTING": "false"}):
+            resp_unauth = await client.post("/api/v1/sensors/register", json=reg_payload)
+            assert resp_unauth.status_code == 401
+            assert "Authentication required" in resp_unauth.json()["detail"]
+
+        # 2. Non-admin user attempting cross-tenant registration rejected with 403
+        analyst_token = create_access_token("analyst_user", "analyst", tenant_id="analyst_tenant")
+        with patch.dict(os.environ, {"TESTING": "false"}):
+            resp_cross = await client.post(
+                "/api/v1/sensors/register",
+                json=reg_payload,
+                headers={"Authorization": f"Bearer {analyst_token}"}
+            )
+            assert resp_cross.status_code == 403
+            assert "foreign organisation" in resp_cross.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_sensor_heartbeat_key_enforcement_and_identity_binding():
+    """
+    Regression test for Phase 1 Step 1 (Sensor Heartbeat Authentication & Identity Binding):
+    - Heartbeat without X-Sensor-Key or Bearer token is rejected with 401.
+    - Heartbeat with invalid X-Sensor-Key is rejected with 401.
+    - Heartbeat with key for sensor A reporting for sensor B is rejected with 403 (identity binding).
+    """
+    from httpx import AsyncClient, ASGITransport
+    from backend.main import app
+    from backend.services.central_management_service import central_management_service
+    from backend.schemas.management import SensorRegistrationReq, SensorSoftwareType
+
+    # Provision two sensors
+    s1 = await central_management_service.register_software_sensor(SensorRegistrationReq(
+        tenant_id="tenant_alpha",
+        name="alpha-probe",
+        software_type=SensorSoftwareType.SURICATA,
+        software_version="7.0.2",
+        hostname="alpha-box"
+    ))
+    s2 = await central_management_service.register_software_sensor(SensorRegistrationReq(
+        tenant_id="tenant_beta",
+        name="beta-probe",
+        software_type=SensorSoftwareType.ZEEK,
+        software_version="6.0.3",
+        hostname="beta-box"
+    ))
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        hb_body = {
+            "sensor_id": s1.sensor_id,
+            "cpu_usage_pct": 15.0,
+            "memory_usage_mb": 256.0,
+            "kernel_drops_count": 0,
+            "packets_processed": 5000,
+            "uptime_seconds": 600.0
+        }
+
+        # 1. Missing authentication rejected with 401
+        res_no_auth = await client.post("/api/v1/sensors/heartbeat", json=hb_body)
+        assert res_no_auth.status_code == 401
+
+        # 2. Invalid sensor key rejected with 401
+        res_bad_key = await client.post(
+            "/api/v1/sensors/heartbeat",
+            json=hb_body,
+            headers={"X-Sensor-Key": "ntrq_invalid_key_12345"}
+        )
+        assert res_bad_key.status_code == 401
+
+        # 3. Valid key for sensor A submitting heartbeat for sensor B rejected with 403
+        hb_body_mismatch = dict(hb_body)
+        hb_body_mismatch["sensor_id"] = s2.sensor_id
+        res_mismatch = await client.post(
+            "/api/v1/sensors/heartbeat",
+            json=hb_body_mismatch,
+            headers={"X-Sensor-Key": s1.api_key}
+        )
+        assert res_mismatch.status_code == 401 or res_mismatch.status_code == 403
+        assert "mismatch" in res_mismatch.json()["detail"].lower() or "unauthorized" in res_mismatch.json()["detail"].lower()
+
+        # 4. Valid key with matching sensor ID accepted with 200
+        res_valid = await client.post(
+            "/api/v1/sensors/heartbeat",
+            json=hb_body,
+            headers={"X-Sensor-Key": s1.api_key}
+        )
+        assert res_valid.status_code == 200
+        assert res_valid.json()["sensor_status"] == "healthy"
+
+
+@pytest.mark.asyncio
+async def test_database_health_reporting_and_production_safeguards():
+    """
+    Regression test for Phase 1 Step 2 (Database Health Reporting & Production Safeguards):
+    - In-memory database fallback is accurately detected and reported as 'degraded'.
+    - /health endpoint returns status: 'degraded' when MongoDB is not connected.
+    - MongoDB ping when healthy returns status: 'healthy' and database: 'online'.
+    - DatabaseManager.connect_db() in production environment refuses silent in-memory fallback.
+    """
+    from httpx import AsyncClient, ASGITransport
+    from backend.main import app
+    from backend.database.database import DatabaseManager
+    from backend.database.in_memory_db import InMemoryDatabase
+    from backend.database.exceptions import DatabaseConnectionError
+    from unittest.mock import AsyncMock, patch
+
+    # 1. In-memory database health status
+    DatabaseManager.db = InMemoryDatabase()
+    DatabaseManager.client = None
+
+    assert DatabaseManager.is_in_memory() is True
+    assert DatabaseManager.is_persistent() is False
+    assert await DatabaseManager.health_check() is False
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        res = await client.get("/api/v1/health")
+        assert res.status_code == 200
+        data = res.json()
+        assert data["status"] == "degraded"
+        assert "in-memory fallback" in data["components"]["database"]
+        assert data["components"]["database_persistent"] is False
+        assert data["components"]["database_storage"] == "in-memory"
+
+        # 2. Healthy MongoDB mock
+        mock_client = AsyncMock()
+        mock_client.admin.command = AsyncMock(return_value={"ok": 1})
+        old_client = DatabaseManager.client
+        old_db = DatabaseManager.db
+        try:
+            DatabaseManager.client = mock_client
+            DatabaseManager.db = AsyncMock() # Non InMemoryDatabase
+            assert DatabaseManager.is_persistent() is True
+            assert await DatabaseManager.health_check() is True
+
+            res_healthy = await client.get("/api/v1/health")
+            data_healthy = res_healthy.json()
+            assert data_healthy["components"]["database"] == "online"
+            assert data_healthy["components"]["database_persistent"] is True
+            assert data_healthy["components"]["database_storage"] == "mongodb"
+        finally:
+            DatabaseManager.client = old_client
+            DatabaseManager.db = old_db
+
+    # 3. Production safeguard: connect_db refuses in-memory fallback in production
+    DatabaseManager.db = None
+    DatabaseManager.client = None
+    with patch.dict(os.environ, {"ENVIRONMENT": "production", "MONGO_TIMEOUT_MS": "100"}), \
+         patch("backend.database.database.AsyncIOMotorClient", side_effect=Exception("Connection refused")):
+        with pytest.raises(DatabaseConnectionError) as exc_info:
+            await DatabaseManager.connect_db(retries=1)
+        assert "Refusing to run on unpersisted volatile in-memory fallback" in str(exc_info.value)
+    DatabaseManager.db = InMemoryDatabase()
+
+

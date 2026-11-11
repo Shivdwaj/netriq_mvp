@@ -69,6 +69,15 @@ class DatabaseManager:
                     await asyncio.sleep(delay)
                     delay *= backoff_factor
                 else:
+                    env = os.getenv("ENVIRONMENT", os.getenv("ENV", "development")).lower()
+                    if env in ("production", "prod"):
+                        logger.critical(
+                            "[DatabaseManager] MongoDB unreachable in PRODUCTION environment! "
+                            "Refusing to continue with unpersisted volatile in-memory fallback."
+                        )
+                        raise DatabaseConnectionError(
+                            "MongoDB connection failed in production. Refusing to run on unpersisted volatile in-memory fallback."
+                        )
                     logger.warning(
                         "[DatabaseManager] Remote MongoDB unreachable (SSL/IP whitelist block). "
                         "Falling back to resilient In-Memory Database store so NetrIQ services and login remain fully functional."
@@ -96,6 +105,19 @@ class DatabaseManager:
         return cls.db
 
     @classmethod
+    def is_in_memory(cls) -> bool:
+        """Returns True if the active database is the volatile in-memory fallback."""
+        if cls.db is None:
+            return False
+        from backend.database.in_memory_db import InMemoryDatabase
+        return isinstance(cls.db, InMemoryDatabase) or cls.client is None
+
+    @classmethod
+    def is_persistent(cls) -> bool:
+        """Returns True if connected to live persistent MongoDB."""
+        return cls.client is not None and not cls.is_in_memory()
+
+    @classmethod
     async def _ensure_indexes(cls):
         """Delegates to the authoritative index definitions in database/indexes.py."""
         from backend.database.indexes import ensure_indexes  # lazy to avoid circular import
@@ -103,10 +125,12 @@ class DatabaseManager:
 
     @classmethod
     async def health_check(cls) -> bool:
-        """Pings the database to verify connectivity for api/health.py."""
-        if cls.db is not None:
-            return True
-        if cls.client is None:
+        """
+        Pings the database to verify connectivity for health reporting.
+        Returns True ONLY if live persistent MongoDB connection responds to ping.
+        Returns False if MongoDB is unavailable or running on volatile in-memory store.
+        """
+        if cls.is_in_memory() or cls.client is None:
             return False
         try:
             await cls.client.admin.command('ping')
