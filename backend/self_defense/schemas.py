@@ -172,3 +172,34 @@ class SensorTrustScore(BaseModel):
     updated_at_iso: str = Field(default_factory=get_utc_now_iso)
 
 
+# ==============================================================================
+# Pipeline Integrity Guard Schemas (Step 3)
+# ==============================================================================
+
+class PipelineAnomalyType(str, Enum):
+    MISSING_HEADERS = "MISSING_HEADERS"
+    INVALID_SIGNATURE = "INVALID_SIGNATURE"
+    EXPIRED_TIMESTAMP = "EXPIRED_TIMESTAMP"
+    FUTURE_TIMESTAMP = "FUTURE_TIMESTAMP"
+    REPLAY_SEQUENCE = "REPLAY_SEQUENCE"
+    OUT_OF_ORDER_SEQUENCE = "OUT_OF_ORDER_SEQUENCE"
+    SEQUENCE_GAP = "SEQUENCE_GAP"
+    SPOOFED_IDENTITY = "SPOOFED_IDENTITY"
+
+
+class PipelineIntegrityVerdict(BaseModel):
+    """Integrity evaluation verdict for a received HTTP batch."""
+    model_config = ConfigDict(extra="allow")
+
+    is_valid: bool
+    sensor_id: str
+    tenant_id: str
+    sequence_number: int
+    timestamp: float
+    key_version: str = "v1"
+    gap_detected: bool = False
+    gap_size: int = 0
+    anomaly_type: Optional[PipelineAnomalyType] = None
+    error_message: Optional[str] = None
+
+

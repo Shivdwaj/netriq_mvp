@@ -256,3 +256,6 @@ reports_repo = BaseRepository("reports")
 settings_repo = BaseRepository("settings")
 predictions_repo = PredictionsRepository()
 idempotency_repo = BaseRepository("idempotency")
+
+# 13. Pipeline Sequence State for Anti-Replay (Stage 2 Step 3)
+pipeline_sequences_repo = BaseRepository("pipeline_sequences")

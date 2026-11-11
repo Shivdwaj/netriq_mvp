@@ -20,6 +20,10 @@ from backend.schemas.management import (
     SensorItem
 )
 from backend.database.collections import sensors_repo
+from backend.self_defense.pipeline_guard import (
+    pipeline_guard,
+    PipelineIntegrityError,
+)
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/sensors", tags=["sensors"])
@@ -484,6 +488,21 @@ async def ingest_suricata_eve(
             raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Batch limit exceeded: Maximum 1,000 events per ingestion request.")
 
         tenant_id = _get_request_tenant(req)
+        auth_user = getattr(req.state, "user", {}) or {}
+        sensor_id = auth_user.get("sensor_id") or auth_user.get("sub", "sensor")
+
+        # Pipeline Integrity Guard Check (HMAC-SHA256, sequence CAS, freshness)
+        raw_body = await req.body()
+        try:
+            verdict = await pipeline_guard.verify_request(
+                raw_body=raw_body,
+                headers=dict(req.headers),
+                authenticated_sensor_id=sensor_id,
+                authenticated_tenant_id=tenant_id
+            )
+        except PipelineIntegrityError as pie:
+            raise HTTPException(status_code=pie.status_code, detail=str(pie))
+
         now = time.time()
         filtered_records = _validate_and_filter_records(records, now)
         trust_tag = await _evaluate_sensor_trust_telemetry(req, tenant_id, len(records))
@@ -527,6 +546,21 @@ async def ingest_zeek_conn(
             raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Batch limit exceeded: Maximum 1,000 events per ingestion request.")
 
         tenant_id = _get_request_tenant(req)
+        auth_user = getattr(req.state, "user", {}) or {}
+        sensor_id = auth_user.get("sensor_id") or auth_user.get("sub", "sensor")
+
+        # Pipeline Integrity Guard Check (HMAC-SHA256, sequence CAS, freshness)
+        raw_body = await req.body()
+        try:
+            verdict = await pipeline_guard.verify_request(
+                raw_body=raw_body,
+                headers=dict(req.headers),
+                authenticated_sensor_id=sensor_id,
+                authenticated_tenant_id=tenant_id
+            )
+        except PipelineIntegrityError as pie:
+            raise HTTPException(status_code=pie.status_code, detail=str(pie))
+
         now = time.time()
         filtered_records = _validate_and_filter_records(records, now)
         trust_tag = await _evaluate_sensor_trust_telemetry(req, tenant_id, len(records))
@@ -570,6 +604,21 @@ async def ingest_zeek_dns(
             raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Batch limit exceeded: Maximum 1,000 events per ingestion request.")
 
         tenant_id = _get_request_tenant(req)
+        auth_user = getattr(req.state, "user", {}) or {}
+        sensor_id = auth_user.get("sensor_id") or auth_user.get("sub", "sensor")
+
+        # Pipeline Integrity Guard Check (HMAC-SHA256, sequence CAS, freshness)
+        raw_body = await req.body()
+        try:
+            verdict = await pipeline_guard.verify_request(
+                raw_body=raw_body,
+                headers=dict(req.headers),
+                authenticated_sensor_id=sensor_id,
+                authenticated_tenant_id=tenant_id
+            )
+        except PipelineIntegrityError as pie:
+            raise HTTPException(status_code=pie.status_code, detail=str(pie))
+
         now = time.time()
         filtered_records = _validate_and_filter_records(records, now)
         trust_tag = await _evaluate_sensor_trust_telemetry(req, tenant_id, len(records))
