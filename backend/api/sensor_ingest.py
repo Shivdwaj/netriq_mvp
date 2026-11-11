@@ -48,6 +48,12 @@ async def require_sensor_identity(req: Request) -> Dict[str, Any]:
             sensors = await sensors_repo.list(filter_query={"api_key_hash": key_hash}, limit=1)
             if sensors:
                 s = sensors[0]
+                # Reject inactive or revoked sensors
+                if not s.get("is_active", True) or s.get("status") in ("revoked", "deactivated", "disabled"):
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="Sensor authentication failed: Sensor key has been revoked or deactivated."
+                    )
                 auth_user = {
                     "sub": s["sensor_id"],
                     "sensor_id": s["sensor_id"],
@@ -57,6 +63,8 @@ async def require_sensor_identity(req: Request) -> Dict[str, Any]:
                     "software_type": s.get("software_type", "sensor")
                 }
                 req.state.user = auth_user
+        except HTTPException:
+            raise
         except Exception as e:
             logger.warning(f"Error checking sensor API key: {e}")
 
@@ -66,7 +74,21 @@ async def require_sensor_identity(req: Request) -> Dict[str, Any]:
             detail="Sensor authentication required: Provide a valid 'X-Sensor-Key' header or Bearer token."
         )
 
+    # If authenticated via Bearer token as a sensor, ensure it has not been revoked/deactivated
     user_role = auth_user.get("role")
+    sensor_id = auth_user.get("sensor_id") or auth_user.get("sub")
+    if user_role in ("sensor", "sensor_ingest") and sensor_id:
+        try:
+            s_recs = await sensors_repo.list(filter_query={"sensor_id": sensor_id}, limit=1)
+            if s_recs and (not s_recs[0].get("is_active", True) or s_recs[0].get("status") in ("revoked", "deactivated", "disabled")):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Sensor authentication failed: Sensor has been revoked or deactivated."
+                )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.warning(f"Error checking sensor active status: {e}")
     if user_role not in (Role.ADMIN.value, "sensor", "sensor_ingest", Role.ANALYST.value):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -236,6 +258,8 @@ async def report_sensor_heartbeat(
 
     try:
         return await central_management_service.record_sensor_heartbeat(body)
+    except PermissionError as perm_err:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(perm_err))
     except HTTPException:
         raise
     except ValueError as val_err:
