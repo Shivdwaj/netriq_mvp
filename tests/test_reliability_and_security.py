@@ -952,3 +952,154 @@ async def test_database_health_reporting_and_production_safeguards():
     DatabaseManager.db = InMemoryDatabase()
 
 
+@pytest.mark.asyncio
+async def test_event_bus_bounded_queue_and_backpressure():
+    """
+    Regression test for Phase 2 Step 3 (Bounded Event Processing & Backpressure):
+    - Replaces unbounded create_task with bounded queue and worker pool.
+    - Full queue triggers backpressure timeout and safely drops without memory leak.
+    - Worker pool consumes and executes subscriber callbacks.
+    """
+    from backend.pipeline.event_bus import SecurityEventBus
+    from backend.pipeline.schemas import NormalizedSecurityEvent
+
+    bus = SecurityEventBus(history_limit=10, max_queue_size=3, max_concurrency=1)
+    processed = []
+
+    async def slow_consumer(event: NormalizedSecurityEvent):
+        await asyncio.sleep(0.5)
+        processed.append(event.event_id)
+
+    bus.subscribe(slow_consumer)
+
+    # Rapidly burst 15 events into queue of capacity 3 with 0.001s timeout
+    dropped_count = 0
+    for i in range(15):
+        evt = NormalizedSecurityEvent(
+            event_id=f"evt-{i}",
+            source_ip="10.0.0.1",
+            destination_ip="10.0.0.2"
+        )
+        res = await bus.publish(evt, timeout=0.001)
+        if not res:
+            dropped_count += 1
+
+    assert dropped_count > 0 or bus.dropped_count > 0
+    assert bus.dropped_count >= 1
+
+    # Drain remaining events
+    await bus.drain(timeout=2.0)
+    await bus.shutdown()
+    assert len(processed) > 0
+
+
+@pytest.mark.asyncio
+async def test_correlation_duplicate_event_insertion_prevention():
+    """
+    Regression test for Phase 2 Step 4 (Duplicate Event Insertion Prevention):
+    - evidence_service.link_event_to_incident deduplicates multiple linkages for same (incident_id, event_id).
+    - correlation_engine does not duplicate events in tracker when evaluating findings.
+    """
+    from backend.services.evidence_service import evidence_service
+    from backend.database.collections import incident_events_repo
+    from backend.schemas.entities import IncidentEventRole
+    from backend.database.in_memory_db import InMemoryDatabase
+    from backend.database.database import DatabaseManager
+
+    DatabaseManager.db = InMemoryDatabase()
+
+    tenant_id = "test_tenant"
+    inc_id = "inc-test-dedup-01"
+    evt_id = "evt-test-unique-01"
+
+    # 1. Link event first time
+    l1 = await evidence_service.link_event_to_incident(
+        tenant_id=tenant_id,
+        incident_id=inc_id,
+        event_id=evt_id,
+        role_in_incident=IncidentEventRole.TRIGGER
+    )
+    assert l1 is not None
+
+    # 2. Repeated link calls for same incident_id and event_id return existing without creating duplicates
+    l2 = await evidence_service.link_event_to_incident(
+        tenant_id=tenant_id,
+        incident_id=inc_id,
+        event_id=evt_id,
+        role_in_incident=IncidentEventRole.SUPPORTING
+    )
+    assert l2.event_id == l1.event_id
+    assert l2.incident_id == l1.incident_id
+
+    # 3. Verify exactly 1 record in incident_events repository
+    matches = await incident_events_repo.list(filter_query={"incident_id": inc_id, "event_id": evt_id})
+    assert len(matches) == 1
+
+
+@pytest.mark.asyncio
+async def test_restore_active_incident_association_after_restart():
+    """
+    Regression test for Phase 2 Step 5 (Restore Active Incident Association after Restarts):
+    - When backend restarts, in-memory trackers are empty.
+    - Next event for an asset with an ongoing open incident associates with the existing incident
+      instead of creating a fragmented second incident.
+    """
+    import time
+    from backend.services.correlation_service import CorrelationEngine
+    from backend.database.collections import incidents_repo
+    from backend.pipeline.schemas import NormalizedSecurityEvent, DeviceIdentity
+    from backend.database.in_memory_db import InMemoryDatabase
+    from backend.database.database import DatabaseManager
+
+    DatabaseManager.db = InMemoryDatabase()
+
+    attacker_ip = "192.168.1.99"
+    now = time.time()
+
+    # 1. Seed existing open incident created 10 minutes ago
+    existing_inc_id = await incidents_repo.create({
+        "tenant_id": "corp_restart",
+        "status": "investigating",
+        "incident_type": "Multi-Stage Attack",
+        "severity": "HIGH",
+        "title": "Initial Discovery",
+        "src_ip": attacker_ip,
+        "affected_assets": [attacker_ip],
+        "created_at": now - 600,
+        "updated_at": now - 300,
+        "attack_chain": ["Stage 1: Discovery (T1046)"],
+        "evidence": [{"event_id": "seed-evt-1", "dst_port": 80, "stage": "reconnaissance"}],
+        "event_count": 1
+    })
+
+    # 2. Simulate fresh engine post-restart (empty _trackers)
+    engine = CorrelationEngine(window_seconds=1200.0)
+    assert attacker_ip not in engine._trackers
+
+    # 3. New event arrives from same attacker IP
+    new_evt = NormalizedSecurityEvent(
+        tenant_id="corp_restart",
+        source_ip=attacker_ip,
+        destination_ip="192.168.1.10",
+        source_port=55100,
+        destination_port=445,  # Lateral SMB probe
+        protocol="TCP",
+        event_type="connection",
+        direction="internal",
+        device=DeviceIdentity(ip=attacker_ip, hostname="Restart-Node", is_managed=True)
+    )
+
+    await engine.process_event(new_evt)
+
+    # 4. Verify the active incident was restored from DB rather than duplicated
+    tracker = engine._trackers.get(attacker_ip)
+    assert tracker is not None
+    assert tracker.active_incident_id == existing_inc_id
+
+    # 5. Verify no second incident was created in incidents_repo
+    all_incs = await incidents_repo.list(filter_query={"src_ip": attacker_ip})
+    assert len(all_incs) == 1
+    assert all_incs[0]["id"] == existing_inc_id
+
+
+

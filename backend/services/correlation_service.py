@@ -72,14 +72,51 @@ class CorrelationEngine:
         self.risk_engine = RiskEngine(self.config)
         self.explainer = IncidentExplainer()
 
-    def _get_tracker(self, key: str) -> DeviceActivityTracker:
+    async def _get_tracker(self, key: str, tenant_id: Optional[str] = None) -> DeviceActivityTracker:
         now = time.time()
         if key not in self._trackers:
-            self._trackers[key] = DeviceActivityTracker(key, self.window_seconds)
+            tracker = DeviceActivityTracker(key, self.window_seconds)
+            await self._restore_active_incident(tracker, key, tenant_id)
+            self._trackers[key] = tracker
         tracker = self._trackers[key]
         tracker.prune(now)
         tracker.last_updated = now
         return tracker
+
+    async def _restore_active_incident(self, tracker: DeviceActivityTracker, key: str, tenant_id: Optional[str] = None):
+        """
+        Restores active incident association from MongoDB after a backend restart.
+        Prevents fragmentation / duplicate incident creation for ongoing attacks.
+        """
+        try:
+            now = time.time()
+            cutoff = now - max(self.window_seconds * 2, 7200.0)
+            filter_q: Dict[str, Any] = {
+                "status": {"$in": ["new", "investigating", "open", "in_progress"]},
+                "updated_at": {"$gte": cutoff},
+                "$or": [{"src_ip": key}, {"affected_assets": key}]
+            }
+            if tenant_id and tenant_id != "global":
+                filter_q["tenant_id"] = tenant_id
+
+            active_incidents = await incidents_repo.list(
+                filter_query=filter_q,
+                limit=1,
+                sort_by=[("updated_at", -1)]
+            )
+            if active_incidents:
+                inc = active_incidents[0]
+                tracker.active_incident_id = inc.get("id") or str(inc.get("_id", ""))
+                # Rehydrate recent evidence events from incident
+                for ev in inc.get("evidence", []):
+                    if isinstance(ev, dict):
+                        tracker.events.append(ev)
+                logger.info(
+                    f"[CorrelationEngine] Restored active incident {tracker.active_incident_id} "
+                    f"for device '{key}' from persistent storage."
+                )
+        except Exception as e:
+            logger.debug(f"[CorrelationEngine] Could not restore active incident for {key}: {e}")
 
     async def process_detection(self, finding: Any, event: NormalizedSecurityEvent):
         """
@@ -92,7 +129,7 @@ class CorrelationEngine:
                 return
 
             now = time.time()
-            tracker = self._get_tracker(device_key)
+            tracker = await self._get_tracker(device_key, getattr(event, "tenant_id", None))
 
             stage = finding.mitre_stage or "reconnaissance"
             engine_str = getattr(finding.engine_type, "value", str(finding.engine_type))
@@ -116,6 +153,11 @@ class CorrelationEngine:
                 "details": finding.evidence
             }
 
+            # Deduplication: avoid duplicate event insertions for the same finding
+            for existing in tracker.events:
+                if existing.get("event_id") == event.event_id and existing.get("finding_id") == finding.finding_id:
+                    return
+
             tracker.events.append(evidence_item)
             tracker.prune(now)
             await self._evaluate_and_synthesize_incident(tracker, event)
@@ -133,13 +175,16 @@ class CorrelationEngine:
             try:
                 from backend.detection import detection_manager
                 findings = detection_manager.evaluate(event)
-                for finding in findings:
-                    await self.process_detection(finding, event)
+                if findings:
+                    for finding in findings:
+                        await self.process_detection(finding, event)
+                    # Handled with high fidelity by Layer 3 detection engines; skip redundant raw flow duplication
+                    return
             except Exception as det_err:
                 logger.debug(f"[CorrelationEngine] Layer 3 detection evaluation error: {det_err}")
 
             now = time.time()
-            tracker = self._get_tracker(device_key)
+            tracker = await self._get_tracker(device_key, getattr(event, "tenant_id", None))
 
             stage = None
             ev_type_str = getattr(event.event_type, "value", event.event_type)
@@ -422,10 +467,12 @@ class CorrelationEngine:
             incident_doc["id"] = inc_id
             logger.info(f"[CorrelationEngine] Generated Intelligence Incident {inc_id} ({severity}) for {target_ip}")
 
-            # Link contributing events to incident
+            # Link contributing events to incident (deduplicating against repeated event_ids)
+            seen_eids = set()
             for ev in tracker.events:
                 eid = ev.get("event_id") if isinstance(ev, dict) else getattr(ev, "event_id", None)
-                if eid:
+                if eid and eid not in seen_eids:
+                    seen_eids.add(eid)
                     try:
                         fid = ev.get("finding_id") if isinstance(ev, dict) else None
                         await evidence_service.link_event_to_incident(
