@@ -376,6 +376,7 @@ class RecoveryRequest(BaseModel):
     sensor_id: str
     tenant_id: str = Field(default="default")
     approver_id: str
+    requester_id: Optional[str] = None
     new_api_key_hash: Optional[str] = None
     validation_notes: str = Field(default="")
     reset_trust_score: float = Field(default=1.0)

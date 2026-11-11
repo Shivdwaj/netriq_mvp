@@ -47,6 +47,26 @@ class ConnectionManager:
                         
         logger.debug(f"WS Disconnect: User {user_id} (Role: {role.value})")
 
+    async def force_disconnect_user(self, user_id: str, code: int = 1008, reason: str = "Administrative containment"):
+        """
+        Forcibly closes and evicts all active WebSocket connections for a specific user or sensor.
+        Used by the Autonomous Response Controller (ARC) to instantly terminate compromised sessions.
+        """
+        async with self._lock:
+            websockets = self.active_connections.get(user_id, set()).copy()
+            if user_id in self.active_connections:
+                del self.active_connections[user_id]
+            self.user_tenants.pop(user_id, None)
+            for role_set in self.role_registry.values():
+                role_set.discard(user_id)
+
+        logger.info(f"WS Force Disconnect: User/Sensor {user_id} terminated ({len(websockets)} sockets closed). Reason: {reason}")
+        for ws in websockets:
+            try:
+                await ws.close(code=code, reason=reason)
+            except Exception as e:
+                logger.debug(f"Error closing socket for {user_id}: {e}")
+
     async def send_to_user(self, user_id: str, event: Event):
         """Sends an event to all active connections for a specific user."""
         async with self._lock:

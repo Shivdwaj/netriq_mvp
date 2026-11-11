@@ -230,12 +230,40 @@ async def test_watchdog_daemon_lifecycle(watchdog, ledger):
     assert watchdog._running is False
 
 
-def test_watchdog_cli_run_once(temp_dir):
+def test_watchdog_cli_run_once(temp_dir, mock_repo):
     """Verify CLI --run-once exits 0 on clean ledger and 1 on tamper."""
     from backend.self_defense.watchdog import main
 
-    # 1. Clean run test
-    with patch("sys.argv", ["watchdog.py", "--run-once", "--alert-file", str(temp_dir / "cli_alerts.jsonl")]):
-        with pytest.raises(SystemExit) as exc_info:
-            main()
-        assert exc_info.value.code == 0
+    clean_ledger = CryptographicallySealedAuditLedger(
+        repository=mock_repo,
+        anchor_store=ExternalAnchorStore(temp_dir / "cli_anchors.jsonl"),
+    )
+
+    with patch("backend.self_defense.watchdog.global_audit_ledger", clean_ledger):
+        # 1. Clean run test -> exits 0
+        with patch("sys.argv", ["watchdog.py", "--run-once", "--alert-file", str(temp_dir / "cli_alerts.jsonl")]):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+            assert exc_info.value.code == 0
+
+        # 2. Add an entry, corrupt it, verify CLI exits 1
+        asyncio.run(clean_ledger.append_entry(
+            tenant_id="tenant-cli",
+            actor={"id": "admin"},
+            action="RULE_CREATE",
+            resource_type="rule",
+            resource_id="rule-99",
+            status="SUCCESS",
+            details={},
+        ))
+
+        # Tamper directly in mock_repo
+        asyncio.run(mock_repo.collection.update_one(
+            {"sequence_number": 1},
+            {"$set": {"action": "TAMPERED_ACTION"}}
+        ))
+
+        with patch("sys.argv", ["watchdog.py", "--run-once", "--alert-file", str(temp_dir / "cli_alerts.jsonl")]):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+            assert exc_info.value.code == 1

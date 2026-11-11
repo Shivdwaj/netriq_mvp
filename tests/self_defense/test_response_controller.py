@@ -514,3 +514,342 @@ async def test_all_containment_and_recovery_operations_have_sealed_audit_proof(m
     assert verification.is_valid is True
     assert verification.total_records >= 3  # Stage 1 + Stage 2 + Recovery
     assert verification.tamper_detected is False
+
+
+# ==============================================================================
+# 7. Production-Hardened ARC Review Tests (Issues 1 - 5)
+# ==============================================================================
+
+@pytest.mark.asyncio
+async def test_confirmation_gate_aborts_revocation_if_trust_recovers(mock_db, alert_sink, mock_ledger):
+    """
+    Issue 1: Option B confirmation gate aborts Stage 2 credential revocation if
+    the sensor's trust score recovered to >= 0.50 during quarantine observation.
+    """
+    from backend.self_defense.sensor_trust import SensorTrustEngine
+
+    ste = SensorTrustEngine(sensors_repository=sensors_repo, audit_ledger_instance=mock_ledger)
+    controller = AutonomousResponseController(
+        audit_ledger_instance=mock_ledger,
+        alert_sinks=[alert_sink],
+        sensors_repository=sensors_repo,
+        sensor_trust_engine=ste,
+    )
+
+    await sensors_repo.create({
+        "sensor_id": "sensor-gate-recover",
+        "tenant_id": "tenant-gate",
+        "is_active": True,
+        "status": "active",
+        "api_key_hash": "hash_xyz",
+    })
+
+    # Step 1: Execute Stage 1 Quarantine only
+    rec_stage1 = await controller.quarantine_sensor(
+        sensor_id="sensor-gate-recover",
+        tenant_id="tenant-gate",
+        trust_score=0.45,
+        reason="Initial transient jitter",
+    )
+    assert rec_stage1.status == ContainmentStatus.QUARANTINED
+    assert rec_stage1.stage == ContainmentStage.STAGE_1_QUARANTINE
+
+    # Simulate trust recovery during quarantine observation (e.g. spurious alert investigated)
+    ste.reset_sensor_trust("sensor-gate-recover", "tenant-gate", new_score=0.85)
+
+    # Step 2: Confirmation Gate evaluation
+    rec_after_gate = await controller.confirm_and_escalate_revocation(
+        sensor_id="sensor-gate-recover",
+        tenant_id="tenant-gate",
+        confirmation_reason="Evaluating persistent collapse",
+    )
+
+    # Confirmation Gate aborted revocation because trust recovered!
+    assert rec_after_gate.status == ContainmentStatus.QUARANTINED
+    assert rec_after_gate.stage == ContainmentStage.STAGE_1_QUARANTINE
+    assert rec_after_gate.revoked_at is None
+
+    # DB status remains quarantined, NOT revoked
+    doc = (await sensors_repo.list({"sensor_id": "sensor-gate-recover", "tenant_id": "tenant-gate"}))[0]
+    assert doc["status"] == "quarantined"
+
+
+@pytest.mark.asyncio
+async def test_confirmation_gate_escalates_to_revocation_when_collapse_persists(mock_db, alert_sink, mock_ledger):
+    """
+    Issue 1: Option B confirmation gate escalates to Stage 2 credential revocation
+    when re-evaluation confirms trust score remains collapsed (< 0.50).
+    """
+    from backend.self_defense.sensor_trust import SensorTrustEngine
+
+    ste = SensorTrustEngine(sensors_repository=sensors_repo, audit_ledger_instance=mock_ledger)
+    controller = AutonomousResponseController(
+        audit_ledger_instance=mock_ledger,
+        alert_sinks=[alert_sink],
+        sensors_repository=sensors_repo,
+        sensor_trust_engine=ste,
+    )
+
+    await sensors_repo.create({
+        "sensor_id": "sensor-gate-persist",
+        "tenant_id": "tenant-gate",
+        "is_active": True,
+        "status": "active",
+        "api_key_hash": "hash_persist",
+    })
+
+    # Step 1: Stage 1 Quarantine
+    await controller.quarantine_sensor(
+        sensor_id="sensor-gate-persist",
+        tenant_id="tenant-gate",
+        trust_score=0.30,
+        reason="Repeated malicious flow anomalies",
+    )
+
+    # Trust remains collapsed in STE
+    score_obj = await ste.get_or_create_trust_score("sensor-gate-persist", "tenant-gate")
+    score_obj.trust_score = 0.25
+
+    # Step 2: Confirmation Gate evaluation
+    rec_revoked = await controller.confirm_and_escalate_revocation(
+        sensor_id="sensor-gate-persist",
+        tenant_id="tenant-gate",
+        confirmation_reason="Confirmation passed: persistent trust collapse",
+    )
+
+    # Escalated to Stage 2 Revocation
+    assert rec_revoked.status == ContainmentStatus.REVOKED
+    assert rec_revoked.stage == ContainmentStage.STAGE_2_REVOKE
+    assert rec_revoked.revoked_at is not None
+
+    doc = (await sensors_repo.list({"sensor_id": "sensor-gate-persist", "tenant_id": "tenant-gate"}))[0]
+    assert doc["status"] == "revoked"
+
+
+@pytest.mark.asyncio
+async def test_containment_fails_closed_on_db_storage_failure(mock_db, alert_sink, mock_ledger):
+    """
+    Issue 2: Containment failures are not swallowed. Database update error raises
+    ContainmentStorageError and never reports successful containment.
+    """
+    from backend.self_defense.containment import ContainmentStorageError
+
+    controller = AutonomousResponseController(
+        audit_ledger_instance=mock_ledger,
+        alert_sinks=[alert_sink],
+        sensors_repository=sensors_repo,
+    )
+
+    await sensors_repo.create({
+        "sensor_id": "sensor-fail-db",
+        "tenant_id": "tenant-err",
+        "is_active": True,
+        "status": "active",
+    })
+
+    # Mock database failure on update_one
+    with patch.object(sensors_repo.collection, "update_one", side_effect=Exception("Database connection timeout")):
+        with pytest.raises(ContainmentStorageError) as exc_info:
+            await controller.quarantine_sensor(
+                sensor_id="sensor-fail-db",
+                tenant_id="tenant-err",
+                trust_score=0.30,
+            )
+        assert "Database update failed" in str(exc_info.value)
+
+    # Proves sensor is NOT marked contained in memory
+    assert await controller.is_sensor_contained("sensor-fail-db", "tenant-err") is False
+
+
+@pytest.mark.asyncio
+async def test_containment_fails_closed_on_audit_failure(mock_db, alert_sink):
+    """
+    Issue 2: If audit ledger fails to append containment record, containment strictly
+    fails closed (ContainmentAuditError) and rolls back state.
+    """
+    from backend.self_defense.containment import ContainmentAuditError
+
+    failing_ledger = MagicMock()
+    async def failing_append(*args, **kwargs):
+        raise AuditStorageError("Audit disk out of space")
+    failing_ledger.append_entry = failing_append
+
+    controller = AutonomousResponseController(
+        audit_ledger_instance=failing_ledger,
+        alert_sinks=[alert_sink],
+        sensors_repository=sensors_repo,
+    )
+
+    await sensors_repo.create({
+        "sensor_id": "sensor-fail-audit",
+        "tenant_id": "tenant-err",
+        "is_active": True,
+        "status": "active",
+    })
+
+    with pytest.raises(ContainmentAuditError) as exc_info:
+        await controller.quarantine_sensor(
+            sensor_id="sensor-fail-audit",
+            tenant_id="tenant-err",
+            trust_score=0.25,
+        )
+    assert "Audit append failed" in str(exc_info.value)
+
+    # In-memory containment cache was rolled back
+    assert ("tenant-err", "sensor-fail-audit") not in controller.containment_manager._containment_store
+
+
+@pytest.mark.asyncio
+async def test_recovery_fails_closed_on_audit_ledger_failure(mock_db, alert_sink):
+    """
+    Issue 3: Recovery is fail-closed. If audit ledger append fails, recovery strictly
+    fails closed (503) without altering sensor status in database.
+    """
+    failing_ledger = MagicMock()
+    async def failing_append(*args, **kwargs):
+        raise AuditStorageError("Audit ledger immutable partition write error")
+    failing_ledger.append_entry = failing_append
+
+    controller = AutonomousResponseController(
+        audit_ledger_instance=failing_ledger,
+        alert_sinks=[alert_sink],
+        sensors_repository=sensors_repo,
+    )
+
+    # Pre-seed contained sensor in database
+    await sensors_repo.create({
+        "sensor_id": "sensor-rec-fail",
+        "tenant_id": "tenant-fail",
+        "is_active": False,
+        "status": "revoked",
+        "api_key_hash": "old_hash",
+    })
+    # Seed in containment store
+    controller.containment_manager._containment_store[("tenant-fail", "sensor-rec-fail")] = MagicMock(
+        status=ContainmentStatus.REVOKED
+    )
+
+    req = RecoveryRequest(
+        sensor_id="sensor-rec-fail",
+        tenant_id="tenant-fail",
+        approver_id="sec-admin-01",
+        new_api_key_hash=hashlib.sha256(b"rotated_key").hexdigest(),
+    )
+
+    with pytest.raises(RecoveryError) as exc_info:
+        await controller.authorize_sensor_recovery(req)
+    assert exc_info.value.status_code == 503
+    assert "Fail-closed mandate: Audit storage failed" in str(exc_info.value)
+
+    # Database state was NOT reactivated
+    doc = (await sensors_repo.list({"sensor_id": "sensor-rec-fail", "tenant_id": "tenant-fail"}))[0]
+    assert doc["is_active"] is False
+    assert doc["status"] == "revoked"
+    assert doc["api_key_hash"] == "old_hash"
+
+
+@pytest.mark.asyncio
+async def test_authenticated_websocket_session_force_disconnected_on_containment(mock_db, alert_sink, mock_ledger):
+    """
+    Issue 4: Sensor disconnection proof. When a sensor is contained, its active
+    WebSocket session is immediately and actively closed (code 1008 policy violation).
+    """
+    from backend.websocket.manager import manager as ws_manager
+    from backend.auth.roles import Role
+
+    mock_ws = MagicMock()
+    # async close
+    async def async_close(*args, **kwargs):
+        mock_ws.closed = True
+        mock_ws.close_code = kwargs.get("code") or (args[0] if args else None)
+    mock_ws.close = async_close
+
+    # Register active WebSocket for sensor-ws-live
+    await ws_manager.connect("sensor-ws-live", Role.SENSOR, mock_ws, tenant_id="tenant-live")
+    assert "sensor-ws-live" in ws_manager.active_connections
+
+    controller = AutonomousResponseController(
+        audit_ledger_instance=mock_ledger,
+        alert_sinks=[alert_sink],
+        sensors_repository=sensors_repo,
+    )
+
+    await sensors_repo.create({
+        "sensor_id": "sensor-ws-live",
+        "tenant_id": "tenant-live",
+        "is_active": True,
+        "status": "active",
+    })
+
+    # Trigger Stage 1 quarantine
+    await controller.quarantine_sensor("sensor-ws-live", "tenant-live", 0.40)
+
+    # Assert active WebSocket was closed with policy violation and evicted
+    assert mock_ws.closed is True
+    assert mock_ws.close_code == 1008
+    assert "sensor-ws-live" not in ws_manager.active_connections
+
+
+@pytest.mark.asyncio
+async def test_api_boundary_sensor_recovery_authorization_and_two_man_rule(mock_db):
+    """
+    Issue 5: Recovery authorization enforcement at API boundary:
+    1. Anonymous caller rejected (401).
+    2. Non-admin role (Analyst) rejected (403).
+    3. Two-man rule: Requester cannot approve their own recovery (403).
+    4. Valid admin with distinct requester and rotated key succeeds (200).
+    """
+    from backend.auth.jwt_handler import create_access_token
+    from backend.auth.roles import Role
+    from backend.self_defense.response_controller import response_controller
+
+    # Pre-seed contained sensor
+    await sensors_repo.create({
+        "sensor_id": "sensor-api-bound",
+        "tenant_id": "default",
+        "is_active": False,
+        "status": "revoked",
+        "api_key_hash": "stale_hash",
+    })
+    # Mark in controller
+    await response_controller.quarantine_sensor("sensor-api-bound", "default", 0.30)
+
+    token_analyst = create_access_token(user_id="analyst_alice", role=Role.ANALYST.value, tenant_id="default")
+    token_admin = create_access_token(user_id="admin_bob", role=Role.ADMIN.value, tenant_id="default")
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # 1. Anonymous caller -> 401
+        anon_resp = await client.post(
+            "/api/v1/management/sensors/sensor-api-bound/recover",
+            json={"new_api_key": "valid_key_123"}
+        )
+        assert anon_resp.status_code == 401
+
+        # 2. Analyst role -> 403 Forbidden
+        analyst_resp = await client.post(
+            "/api/v1/management/sensors/sensor-api-bound/recover",
+            json={"new_api_key": "valid_key_123"},
+            headers={"Authorization": f"Bearer {token_analyst}"}
+        )
+        assert analyst_resp.status_code == 403
+
+        # 3. Two-Man Rule Violation: Requester == Approver -> 403 Forbidden
+        self_approve_resp = await client.post(
+            "/api/v1/management/sensors/sensor-api-bound/recover",
+            json={"new_api_key": "valid_key_123", "requester_id": "admin_bob"},
+            headers={"Authorization": f"Bearer {token_admin}"}
+        )
+        assert self_approve_resp.status_code == 403
+        assert "Two-man rule violation" in self_approve_resp.json()["detail"]
+
+        # 4. Valid Admin recovery with distinct requester -> 200 OK
+        valid_resp = await client.post(
+            "/api/v1/management/sensors/sensor-api-bound/recover",
+            json={"new_api_key": "brand_new_secure_key_888", "requester_id": "field_tech_dave"},
+            headers={"Authorization": f"Bearer {token_admin}"}
+        )
+        assert valid_resp.status_code == 200
+        assert valid_resp.json()["success"] is True
+        assert valid_resp.json()["trust_score"] == 1.0
+

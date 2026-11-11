@@ -278,3 +278,84 @@ async def get_fleet_version_matrix(req: Request):
     except Exception as e:
         logger.error(f"Failed to retrieve version matrix: {e}", exc_info=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to retrieve software version matrix")
+
+
+# --- ARC Autonomous Containment & Recovery API ---
+from pydantic import BaseModel
+import hashlib
+
+class SensorRecoveryApiReq(BaseModel):
+    new_api_key: Optional[str] = None
+    new_api_key_hash: Optional[str] = None
+    requester_id: Optional[str] = None
+    validation_notes: str = ""
+    reset_trust_score: float = 1.0
+
+
+@router.post("/sensors/{sensor_id}/recover", response_model=Dict[str, Any], dependencies=[Depends(require_permission(Capabilities.MANAGE_ORGANIZATIONS))])
+async def recover_sensor_endpoint(sensor_id: str, body: SensorRecoveryApiReq, req: Request):
+    """
+    ARC Sensor Recovery API Endpoint.
+    Restores an autonomously quarantined/revoked sensor.
+    Enforces:
+    - Caller must be an authenticated administrator (Role.ADMIN).
+    - Approver identity bound directly to authenticated request token (cannot be spoofed).
+    - Two-man rule: Requester and approver must be distinct identities.
+    - Mandatory API key rotation.
+    - Fail-closed audit logging.
+    """
+    auth_user = getattr(req.state, "user", {}) or {}
+    role = get_request_role(req)
+    if role != Role.ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Sensor recovery requires administrator authorization."
+        )
+
+    approver_id = auth_user.get("sub") or auth_user.get("email")
+    if not approver_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required for sensor recovery."
+        )
+
+    # Two-Man Rule enforcement: requester cannot approve their own sensor recovery
+    if body.requester_id and body.requester_id == approver_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Two-man rule violation: Requester cannot approve their own sensor recovery."
+        )
+
+    tenant_id = _get_request_tenant(req)
+
+    # Derive new_api_key_hash if raw key was supplied
+    new_hash = body.new_api_key_hash
+    if not new_hash and body.new_api_key:
+        new_hash = hashlib.sha256(body.new_api_key.encode("utf-8")).hexdigest()
+
+    from backend.self_defense.schemas import RecoveryRequest
+    from backend.self_defense.response_controller import response_controller
+    from backend.self_defense.recovery import RecoveryError
+
+    recovery_req = RecoveryRequest(
+        sensor_id=sensor_id,
+        tenant_id=tenant_id,
+        approver_id=approver_id,
+        requester_id=body.requester_id,
+        new_api_key_hash=new_hash,
+        validation_notes=body.validation_notes,
+        reset_trust_score=body.reset_trust_score,
+    )
+
+    try:
+        result = await response_controller.authorize_sensor_recovery(recovery_req, require_key_rotation=True)
+        return {
+            "success": result.success,
+            "sensor_id": result.sensor_id,
+            "tenant_id": result.tenant_id,
+            "message": result.message,
+            "trust_score": result.trust_score,
+        }
+    except RecoveryError as re:
+        raise HTTPException(status_code=re.status_code, detail=str(re))
+

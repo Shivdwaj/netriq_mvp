@@ -96,6 +96,9 @@ from backend.self_defense.response_policies import (
 )
 from backend.self_defense.containment import (
     SensorContainmentManager,
+    ContainmentError,
+    ContainmentStorageError,
+    ContainmentAuditError,
 )
 from backend.self_defense.recovery import (
     SensorRecoveryManager,

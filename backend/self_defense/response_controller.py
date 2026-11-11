@@ -61,6 +61,7 @@ class AutonomousResponseController:
         audit_ledger_instance: Optional[CryptographicallySealedAuditLedger] = None,
         alert_sinks: Optional[List[AlertSink]] = None,
         sensors_repository=None,
+        sensor_trust_engine=None,
     ):
         self.audit_ledger = audit_ledger_instance or global_audit_ledger
         self.alert_sinks: List[AlertSink] = alert_sinks or []
@@ -70,11 +71,13 @@ class AutonomousResponseController:
         self.policy_engine = ResponsePolicyEngine()
         self.containment_manager = SensorContainmentManager(
             sensors_repository=sensors_repository,
+            sensor_trust_engine=sensor_trust_engine,
             audit_ledger_instance=self.audit_ledger,
         )
         self.recovery_manager = SensorRecoveryManager(
             containment_manager=self.containment_manager,
             sensors_repository=sensors_repository,
+            sensor_trust_engine=sensor_trust_engine,
             audit_ledger_instance=self.audit_ledger,
         )
 
@@ -179,6 +182,59 @@ class AutonomousResponseController:
         )
         await self.broadcast_alert(alert)
 
+        return record
+
+    async def quarantine_sensor(
+        self,
+        sensor_id: str,
+        tenant_id: str,
+        trust_score: Optional[float] = None,
+        reason: str = "Sensor telemetry quarantined",
+        details: Optional[Dict[str, Any]] = None,
+    ) -> ContainmentRecord:
+        """Executes Stage 1: Immediate telemetry quarantine and session eviction."""
+        record = await self.containment_manager.quarantine_sensor(
+            sensor_id=sensor_id,
+            tenant_id=tenant_id,
+            trust_score=trust_score,
+            trigger_reason=reason,
+            details=details,
+        )
+        alert = SecurityAlert(
+            severity=AlertSeverity.HIGH,
+            category=AlertCategory.CONTAINMENT_TRIGGERED,
+            source="arc.sensor_quarantine",
+            message=f"Sensor '{sensor_id}' quarantined in tenant '{tenant_id}'. Telemetry isolated.",
+            details={"sensor_id": sensor_id, "tenant_id": tenant_id, "stage": "STAGE_1"},
+        )
+        await self.broadcast_alert(alert)
+        return record
+
+    async def confirm_and_escalate_revocation(
+        self,
+        sensor_id: str,
+        tenant_id: str,
+        confirmation_reason: str = "Confirmation gate passed: persistent trust collapse",
+        details: Optional[Dict[str, Any]] = None,
+        bypass_trust_recheck: bool = False,
+    ) -> ContainmentRecord:
+        """Executes Stage 2: Verified credential revocation guarded by confirmation gate."""
+        record = await self.containment_manager.confirm_and_escalate_revocation(
+            sensor_id=sensor_id,
+            tenant_id=tenant_id,
+            confirmation_reason=confirmation_reason,
+            details=details,
+            bypass_trust_recheck=bypass_trust_recheck,
+        )
+        if record.status == ContainmentStatus.REVOKED:
+            alert = SecurityAlert(
+                severity=AlertSeverity.CRITICAL,
+                category=AlertCategory.CONTAINMENT_TRIGGERED,
+                source="arc.sensor_revocation",
+                message=f"Sensor '{sensor_id}' credentials revoked in tenant '{tenant_id}' after confirmation.",
+                details={"sensor_id": sensor_id, "tenant_id": tenant_id, "stage": "STAGE_2"},
+            )
+            await self.broadcast_alert(alert)
         return record
 
     async def is_sensor_contained(self, sensor_id: str, tenant_id: str) -> bool:
