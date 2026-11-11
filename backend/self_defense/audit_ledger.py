@@ -504,3 +504,4 @@ class CryptographicallySealedAuditLedger:
 
 # Global singleton instance
 audit_ledger = CryptographicallySealedAuditLedger()
+

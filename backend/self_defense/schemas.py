@@ -121,3 +121,4 @@ class SecurityAlert(BaseModel):
     source: str = Field(default="watchdog.audit_verifier")
     message: str = Field(..., description="Human-readable alert summary")
     details: Dict[str, Any] = Field(default_factory=dict, description="Forensic details (sequence, diffs, hashes)")
+
