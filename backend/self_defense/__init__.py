@@ -21,6 +21,8 @@ from backend.self_defense.schemas import (
     SensorAnomalyType,
     SensorAnomalyEvent,
     SensorTrustScore,
+    PipelineAnomalyType,
+    PipelineIntegrityVerdict,
 )
 from backend.self_defense.audit_ledger import (
     CryptographicallySealedAuditLedger,
@@ -37,6 +39,17 @@ from backend.self_defense.sensor_trust import (
     SensorTrustEngine,
     sensor_trust_engine,
 )
+from backend.self_defense.pipeline_guard import (
+    PipelineIntegrityGuard,
+    pipeline_guard,
+    PipelineIntegrityError,
+    MissingIntegrityHeadersError,
+    InvalidSignatureError,
+    ExpiredTimestampError,
+    FutureTimestampError,
+    ReplaySequenceError,
+    derive_sensor_signing_key,
+)
 
 __all__ = [
     "AuditRecord",
@@ -48,6 +61,8 @@ __all__ = [
     "SensorAnomalyType",
     "SensorAnomalyEvent",
     "SensorTrustScore",
+    "PipelineAnomalyType",
+    "PipelineIntegrityVerdict",
     "CryptographicallySealedAuditLedger",
     "AuditStorageError",
     "AuditTamperError",
@@ -57,5 +72,14 @@ __all__ = [
     "MemoryAlertSink",
     "SensorTrustEngine",
     "sensor_trust_engine",
+    "PipelineIntegrityGuard",
+    "pipeline_guard",
+    "PipelineIntegrityError",
+    "MissingIntegrityHeadersError",
+    "InvalidSignatureError",
+    "ExpiredTimestampError",
+    "FutureTimestampError",
+    "ReplaySequenceError",
+    "derive_sensor_signing_key",
 ]
 

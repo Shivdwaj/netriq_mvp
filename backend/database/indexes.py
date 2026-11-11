@@ -194,6 +194,12 @@ async def ensure_indexes():
         await idemp_coll.create_index([("key", pymongo.ASCENDING)], unique=True, name="idx_idempotency_key")
         await idemp_coll.create_index([("created_at", pymongo.ASCENDING)], expireAfterSeconds=86400, name="idx_idempotency_ttl_24h")
 
+        # ======================================================================
+        # PIPELINE_SEQUENCES (Stage 2 Step 3)
+        # ======================================================================
+        pipe_seq_coll = db["pipeline_sequences"]
+        await pipe_seq_coll.create_index([("tenant_id", pymongo.ASCENDING), ("sensor_id", pymongo.ASCENDING)], unique=True, name="idx_pipeline_seq_tenant_sensor")
+
         logger.info("All 12 NetrIQ entity indexes and TTL policies ensured successfully.")
 
     except Exception as e:
