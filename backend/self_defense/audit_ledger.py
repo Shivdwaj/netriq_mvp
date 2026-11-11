@@ -158,6 +158,9 @@ class CryptographicallySealedAuditLedger:
         self._last_seq: Optional[int] = None
         self._last_hash: Optional[str] = None
 
+    # Convenience alias for append_entry
+    record_action = None
+
     def _get_repo(self):
         if self._repo is not None:
             return self._repo
@@ -321,6 +324,8 @@ class CryptographicallySealedAuditLedger:
                     raise
 
             return record
+
+    record_action = append_entry
 
     async def verify_integrity(self) -> AuditVerificationResult:
         """

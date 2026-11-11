@@ -109,6 +109,10 @@ class AlertCategory(str, Enum):
     MODEL_TAMPERING = "MODEL_TAMPERING"
     RULE_TAMPERING = "RULE_TAMPERING"
     THRESHOLD_TAMPERING = "THRESHOLD_TAMPERING"
+    CANARY_TRIGGERED = "CANARY_TRIGGERED"
+    ADMIN_ANOMALY = "ADMIN_ANOMALY"
+    UNAUTHORIZED_ADMIN_ACTION = "UNAUTHORIZED_ADMIN_ACTION"
+    DUAL_APPROVAL_VIOLATION = "DUAL_APPROVAL_VIOLATION"
 
 
 class SecurityAlert(BaseModel):
@@ -273,5 +277,56 @@ class IntelligenceIntegrityVerdict(BaseModel):
     error_message: Optional[str] = None
     checked_at: float = Field(default_factory=get_utc_now_timestamp)
     checked_at_iso: str = Field(default_factory=get_utc_now_iso)
+
+
+# ==============================================================================
+# Management Security Monitor (MSM) Schemas (Step 5)
+# ==============================================================================
+
+class CanaryTokenType(str, Enum):
+    API_KEY = "API_KEY"
+    USER_ACCOUNT = "USER_ACCOUNT"
+    SENSOR_TOKEN = "SENSOR_TOKEN"
+    DB_MARKER = "DB_MARKER"
+
+
+class CanaryTriggerEvent(BaseModel):
+    """Details captured when a honeypot canary credential/marker is probed."""
+    model_config = ConfigDict(extra="allow")
+
+    token_id: str
+    token_type: CanaryTokenType
+    source_ip: str
+    endpoint: str
+    method: str = "GET"
+    timestamp: float = Field(default_factory=get_utc_now_timestamp)
+    timestamp_iso: str = Field(default_factory=get_utc_now_iso)
+    details: Dict[str, Any] = Field(default_factory=dict)
+
+
+class AdminAnomalyType(str, Enum):
+    BURST_ACTIVITY = "BURST_ACTIVITY"
+    BULK_DELETION = "BULK_DELETION"
+    RAPID_USER_PROVISIONING = "RAPID_USER_PROVISIONING"
+    PRIVILEGE_ESCALATION = "PRIVILEGE_ESCALATION"
+    UNAUTHORIZED_TENANT_MUTATION = "UNAUTHORIZED_TENANT_MUTATION"
+    AUDIT_STORAGE_FAILURE = "AUDIT_STORAGE_FAILURE"
+    DUAL_APPROVAL_MISSING = "DUAL_APPROVAL_MISSING"
+
+
+class DualApprovalRecord(BaseModel):
+    """Two-man rule authorization record for high-impact administrative actions."""
+    model_config = ConfigDict(extra="allow")
+
+    action_id: str
+    action_name: str
+    requester_id: str
+    approver_id: str
+    token: str
+    created_at: float = Field(default_factory=get_utc_now_timestamp)
+    expires_at: float
+    used: bool = False
+    tenant_id: str = "global"
+    details: Dict[str, Any] = Field(default_factory=dict)
 
 

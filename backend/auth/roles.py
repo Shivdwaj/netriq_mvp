@@ -18,6 +18,7 @@ class Capabilities(str, Enum):
     VIEW_SYSTEM_METRICS = "VIEW_SYSTEM_METRICS"
     INGEST_EVENTS = "INGEST_EVENTS"
     VIEW_DETECTION_RULES = "VIEW_DETECTION_RULES"
+    MANAGE_DETECTION_RULES = "MANAGE_DETECTION_RULES"
 
 # The structured permission matrix matching the blueprint specifications.
 # Defines exactly what each role is authorized to do at the API layer.
@@ -33,7 +34,8 @@ PERMISSION_MATRIX = {
         Capabilities.MANAGE_ORGANIZATIONS,
         Capabilities.VIEW_SYSTEM_METRICS,
         Capabilities.INGEST_EVENTS,
-        Capabilities.VIEW_DETECTION_RULES
+        Capabilities.VIEW_DETECTION_RULES,
+        Capabilities.MANAGE_DETECTION_RULES,
     ],
     Role.ANALYST: [
         Capabilities.VIEW_SMART_SUMMARY,
