@@ -83,7 +83,7 @@ class TestResponseEngine(unittest.IsolatedAsyncioTestCase):
             risk_category=RiskCategory.HIGH, latency_ms=1.0
         )
         
-        success = await self.engine.handle_verdict(pred, Action.QUARANTINE, {"src_ip": "10.0.0.5", "src_mac": "AA:BB"})
+        success = await self.engine.handle_verdict(pred, Action.QUARANTINE, {"src_ip": "10.0.0.5", "src_mac": "00:11:22:33:44:05"})
         
         self.assertTrue(success)
         self.mock_quarantine.quarantine_device.assert_called_once()

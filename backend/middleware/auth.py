@@ -18,25 +18,24 @@ class AuthMiddleware(BaseHTTPMiddleware):
     - Malformed / expired / tampered token → immediate HTTP 401 with WWW-Authenticate
       header (RFC 6750 §3.1) so the client knows to re-authenticate, not retry.
     """
-    # Paths that must never be blocked even without a token
+    # Paths that are public documentation or auth endpoints
     _PUBLIC_PREFIXES = (
         "/api/v1/auth/login",
         "/api/v1/auth/refresh",
         "/docs",
         "/openapi",
-        "/redoc",
-        "/api/v1/sensors/register"
+        "/redoc"
     )
 
     async def dispatch(self, request: Request, call_next):
-        # Paths that never require token validation (login, refresh, docs, health, sensor register)
         path = request.url.path
-        if any(path.startswith(prefix) for prefix in self._PUBLIC_PREFIXES) or path in ("/health", "/api/v1/health"):
-            request.state.user = None
-            return await call_next(request)
-
         auth_header = request.headers.get("Authorization")
         x_sensor_key = request.headers.get("X-Sensor-Key")
+
+        # For public endpoints without auth headers, bypass auth extraction
+        if (any(path.startswith(prefix) for prefix in self._PUBLIC_PREFIXES) or path in ("/health", "/api/v1/health")) and not auth_header and not x_sensor_key:
+            request.state.user = None
+            return await call_next(request)
 
         if not auth_header and x_sensor_key:
             # Check sensor authentication via X-Sensor-Key header
@@ -46,6 +45,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 sensors = await sensors_repo.list(filter_query={"api_key_hash": key_hash}, limit=1)
                 if sensors:
                     s = sensors[0]
+                    if not s.get("is_active", True) or s.get("status") in ("revoked", "deactivated", "disabled"):
+                        return JSONResponse(
+                            status_code=401,
+                            headers={"WWW-Authenticate": "Bearer error=\"invalid_token\""},
+                            content={"error": "Unauthorized", "detail": "Sensor authentication failed: Sensor key has been revoked or deactivated."}
+                        )
                     request.state.user = {
                         "sub": s["sensor_id"],
                         "sensor_id": s["sensor_id"],
@@ -96,6 +101,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 sensors = await sensors_repo.list(filter_query={"api_key_hash": key_hash}, limit=1)
                 if sensors:
                     s = sensors[0]
+                    if not s.get("is_active", True) or s.get("status") in ("revoked", "deactivated", "disabled"):
+                        return JSONResponse(
+                            status_code=401,
+                            headers={"WWW-Authenticate": "Bearer error=\"invalid_token\""},
+                            content={"error": "Unauthorized", "detail": "Sensor authentication failed: Sensor key has been revoked or deactivated."}
+                        )
                     request.state.user = {
                         "sub": s["sensor_id"],
                         "sensor_id": s["sensor_id"],

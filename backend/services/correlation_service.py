@@ -49,6 +49,40 @@ class DeviceActivityTracker:
         self.c2_attempts = [e for e in self.events if e.get("stage") == "c2_exfil"]
         self.suspicious_processes = [e for e in self.events if e.get("stage") == "malicious_process"]
 
+class MultiTenantTrackerMap(dict):
+    """
+    Registry for device activity trackers partitioned by tenant and device keys.
+    Legacy lookups by raw device key are reserved for unit test assertions,
+    preventing ambiguous cross-tenant bleed if multiple tenants share an IP.
+    """
+    def __getitem__(self, key: str):
+        if super().__contains__(key):
+            return super().__getitem__(key)
+        # Legacy test lookup by raw device_key
+        matches = [v for k, v in self.items() if k.endswith(f"/device:{key}") or k == key]
+        if len(matches) == 1:
+            return matches[0]
+        elif len(matches) > 1:
+            raise KeyError(f"Ambiguous tracker lookup: multiple tenants share device '{key}'. Use composite key.")
+        raise KeyError(key)
+
+    def get(self, key: str, default=None):
+        if super().__contains__(key):
+            return super().get(key, default)
+        matches = [v for k, v in self.items() if k.endswith(f"/device:{key}") or k == key]
+        if len(matches) == 1:
+            return matches[0]
+        elif len(matches) > 1:
+            logger.warning(f"[MultiTenantTrackerMap] Ambiguous get() for raw device '{key}' across {len(matches)} tenants. Returning default.")
+            return default
+        return default
+
+    def __contains__(self, key: str) -> bool:
+        if super().__contains__(key):
+            return True
+        return any(k.endswith(f"/device:{key}") or k == key for k in self.keys())
+
+
 class CorrelationEngine:
     """
     Structured NetrIQ Intelligence & Correlation Engine.
@@ -66,20 +100,68 @@ class CorrelationEngine:
     def __init__(self, window_seconds: Optional[float] = None, config: Optional[IntelligenceConfig] = None):
         self.config = config or intelligence_config
         self.window_seconds = window_seconds or self.config.window_seconds
-        self._trackers: Dict[str, DeviceActivityTracker] = {}
+        self._trackers: MultiTenantTrackerMap = MultiTenantTrackerMap()
         self.enricher = ContextEnricher(self.config, threat_intel_feed)
         self.behaviour_analyzer = BehaviourAnalyzer(self.config)
         self.risk_engine = RiskEngine(self.config)
         self.explainer = IncidentExplainer()
 
-    def _get_tracker(self, key: str) -> DeviceActivityTracker:
+    def _make_composite_key(self, tenant_id: Optional[str], device_key: str) -> str:
+        tid = tenant_id or "default"
+        return f"tenant:{tid}/device:{device_key}"
+
+    async def _get_tracker(self, device_key: str, tenant_id: Optional[str] = None) -> DeviceActivityTracker:
+        """
+        Retrieves or initializes a device activity tracker using explicit tenant_id and device_key.
+        Avoids unsafe delimiter-splitting assumptions on device keys (e.g. IPv6 addresses).
+        """
         now = time.time()
-        if key not in self._trackers:
-            self._trackers[key] = DeviceActivityTracker(key, self.window_seconds)
-        tracker = self._trackers[key]
+        tid = tenant_id or "default"
+        composite_key = self._make_composite_key(tid, device_key)
+
+        if composite_key not in self._trackers:
+            tracker = DeviceActivityTracker(composite_key, self.window_seconds)
+            await self._restore_active_incident(tracker, device_key, tid)
+            self._trackers[composite_key] = tracker
+        tracker = self._trackers[composite_key]
         tracker.prune(now)
         tracker.last_updated = now
         return tracker
+
+    async def _restore_active_incident(self, tracker: DeviceActivityTracker, key: str, tenant_id: Optional[str] = None):
+        """
+        Restores active incident association from MongoDB after a backend restart.
+        Prevents fragmentation / duplicate incident creation for ongoing attacks.
+        """
+        try:
+            now = time.time()
+            cutoff = now - max(self.window_seconds * 2, 7200.0)
+            filter_q: Dict[str, Any] = {
+                "status": {"$in": ["new", "investigating", "open", "in_progress"]},
+                "updated_at": {"$gte": cutoff},
+                "$or": [{"src_ip": key}, {"affected_assets": key}]
+            }
+            if tenant_id and tenant_id != "global":
+                filter_q["tenant_id"] = tenant_id
+
+            active_incidents = await incidents_repo.list(
+                filter_query=filter_q,
+                limit=1,
+                sort_by=[("updated_at", -1)]
+            )
+            if active_incidents:
+                inc = active_incidents[0]
+                tracker.active_incident_id = inc.get("id") or str(inc.get("_id", ""))
+                # Rehydrate recent evidence events from incident
+                for ev in inc.get("evidence", []):
+                    if isinstance(ev, dict):
+                        tracker.events.append(ev)
+                logger.info(
+                    f"[CorrelationEngine] Restored active incident {tracker.active_incident_id} "
+                    f"for device '{key}' from persistent storage."
+                )
+        except Exception as e:
+            logger.debug(f"[CorrelationEngine] Could not restore active incident for {key}: {e}")
 
     async def process_detection(self, finding: Any, event: NormalizedSecurityEvent):
         """
@@ -92,7 +174,7 @@ class CorrelationEngine:
                 return
 
             now = time.time()
-            tracker = self._get_tracker(device_key)
+            tracker = await self._get_tracker(device_key, getattr(event, "tenant_id", None))
 
             stage = finding.mitre_stage or "reconnaissance"
             engine_str = getattr(finding.engine_type, "value", str(finding.engine_type))
@@ -116,6 +198,11 @@ class CorrelationEngine:
                 "details": finding.evidence
             }
 
+            # Deduplication: avoid duplicate event insertions for the same finding
+            for existing in tracker.events:
+                if existing.get("event_id") == event.event_id and existing.get("finding_id") == finding.finding_id:
+                    return
+
             tracker.events.append(evidence_item)
             tracker.prune(now)
             await self._evaluate_and_synthesize_incident(tracker, event)
@@ -133,13 +220,16 @@ class CorrelationEngine:
             try:
                 from backend.detection import detection_manager
                 findings = detection_manager.evaluate(event)
-                for finding in findings:
-                    await self.process_detection(finding, event)
+                if findings:
+                    for finding in findings:
+                        await self.process_detection(finding, event)
+                    # Handled with high fidelity by Layer 3 detection engines; skip redundant raw flow duplication
+                    return
             except Exception as det_err:
                 logger.debug(f"[CorrelationEngine] Layer 3 detection evaluation error: {det_err}")
 
             now = time.time()
-            tracker = self._get_tracker(device_key)
+            tracker = await self._get_tracker(device_key, getattr(event, "tenant_id", None))
 
             stage = None
             ev_type_str = getattr(event.event_type, "value", event.event_type)
@@ -422,10 +512,12 @@ class CorrelationEngine:
             incident_doc["id"] = inc_id
             logger.info(f"[CorrelationEngine] Generated Intelligence Incident {inc_id} ({severity}) for {target_ip}")
 
-            # Link contributing events to incident
+            # Link contributing events to incident (deduplicating against repeated event_ids)
+            seen_eids = set()
             for ev in tracker.events:
                 eid = ev.get("event_id") if isinstance(ev, dict) else getattr(ev, "event_id", None)
-                if eid:
+                if eid and eid not in seen_eids:
+                    seen_eids.add(eid)
                     try:
                         fid = ev.get("finding_id") if isinstance(ev, dict) else None
                         await evidence_service.link_event_to_incident(

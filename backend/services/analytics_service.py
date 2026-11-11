@@ -11,21 +11,33 @@ class AnalyticsService:
         self._cache = {}
         self._cache_ttl = 30  # Refresh every 30 seconds
 
-    async def get_kpis(self, role: Role) -> Dict[str, Any]:
-        """Calculates real-time KPIs dynamically from live MongoDB collections."""
+    def clear_cache(self):
+        """Clears in-memory KPI and trend caches."""
+        self._cache.clear()
+
+    async def get_kpis(self, role: Role, tenant_id: Optional[str] = None) -> Dict[str, Any]:
+        """Calculates real-time KPIs dynamically from live MongoDB collections with tenant isolation."""
         now = time.time()
-        if "kpis" in self._cache:
-            entry = self._cache["kpis"]
+        tid = tenant_id or "global"
+        cache_key = f"kpis:{tid}"
+        if cache_key in self._cache:
+            entry = self._cache[cache_key]
             if now - entry["timestamp"] < self._cache_ttl:
                 return entry["data"]
 
         try:
-            total_flows = await threats_repo.collection.estimated_document_count()
-            total_responses = await responses_repo.collection.estimated_document_count()
-            total_incidents = await incidents_repo.collection.estimated_document_count()
+            filter_q = {"tenant_id": tenant_id} if tenant_id and tenant_id != "global" else {}
+            if filter_q:
+                total_flows = await threats_repo.collection.count_documents(filter_q)
+                total_responses = await responses_repo.collection.count_documents(filter_q)
+                total_incidents = await incidents_repo.collection.count_documents(filter_q)
+            else:
+                total_flows = await threats_repo.collection.estimated_document_count()
+                total_responses = await responses_repo.collection.estimated_document_count()
+                total_incidents = await incidents_repo.collection.estimated_document_count()
 
-            # Sample the most recent 1000 flows for live statistical distribution
-            recent_flows = await threats_repo.list({}, limit=1000, sort_by=[("timestamp", -1)])
+            # Sample the most recent 1000 flows for live statistical distribution scoped to tenant
+            recent_flows = await threats_repo.list(filter_q, limit=1000, sort_by=[("timestamp", -1)])
             
             anomalies = [f for f in recent_flows if f.get("is_anomaly") or f.get("prediction") in ["ANOMALY", "MALICIOUS", "SUSPICIOUS"]]
             malicious_pct = round((len(anomalies) / max(len(recent_flows), 1)) * 100, 2)
@@ -73,7 +85,7 @@ class AnalyticsService:
                 "unanimous_agreement": 88.4
             }
 
-            self._cache["kpis"] = {"timestamp": now, "data": data}
+            self._cache[cache_key] = {"timestamp": now, "data": data}
             return data
 
         except Exception as e:
@@ -89,11 +101,24 @@ class AnalyticsService:
                 "unanimous_agreement": 0.0
             }
 
-    async def get_trends(self, role: Role, start_time: Optional[float] = None, end_time: Optional[float] = None) -> Dict[str, Any]:
-        """Aggregates threat trend points over the requested time window from live MongoDB records."""
+    async def get_trends(
+        self,
+        role: Role,
+        start_time: Optional[float] = None,
+        end_time: Optional[float] = None,
+        tenant_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Aggregates threat trend points over the requested time window with tenant isolation."""
         now = time.time()
         start = start_time if start_time is not None else (now - 86400.0)
         end = end_time if end_time is not None else now
+        tid = tenant_id or "global"
+        cache_key = f"trends:{tid}:{int(start)}:{int(end)}"
+
+        if cache_key in self._cache:
+            entry = self._cache[cache_key]
+            if now - entry["timestamp"] < self._cache_ttl:
+                return entry["data"]
         
         step = (end - start) / 10
         points = []
@@ -101,14 +126,19 @@ class AnalyticsService:
             for i in range(10):
                 b_start = start + (i * step)
                 b_end = b_start + step
-                count = await threats_repo.collection.count_documents({
-                    "timestamp": {"$gte": b_start, "$lt": b_end},
+                time_filter = {"$gte": b_start, "$lte": b_end} if i == 9 else {"$gte": b_start, "$lt": b_end}
+                query: Dict[str, Any] = {
+                    "timestamp": time_filter,
                     "$or": [
                         {"is_anomaly": True},
                         {"prediction": {"$in": ["ANOMALY", "MALICIOUS", "SUSPICIOUS"]}},
                         {"action": {"$in": ["RECOMMEND_BLOCK", "QUARANTINE"]}}
                     ]
-                })
+                }
+                if tenant_id and tenant_id != "global":
+                    query["tenant_id"] = tenant_id
+
+                count = await threats_repo.collection.count_documents(query)
                 points.append({
                     "timestamp": b_start,
                     "value": count
@@ -118,9 +148,11 @@ class AnalyticsService:
             for i in range(10):
                 points.append({"timestamp": start + (i * step), "value": 0})
 
-        return {
+        result = {
             "series_name": "Threats Blocked",
             "data": points
         }
+        self._cache[cache_key] = {"timestamp": now, "data": result}
+        return result
 
 analytics_service = AnalyticsService()

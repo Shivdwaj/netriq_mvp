@@ -206,7 +206,15 @@ class EvidenceService:
     ) -> IncidentEvent:
         """
         Creates an incident_events join record linking a network event / alert to an incident.
+        Deduplicates against (incident_id, event_id) to prevent duplicate event insertion.
         """
+        existing = await incident_events_repo.list(
+            filter_query={"incident_id": incident_id, "event_id": event_id},
+            limit=1
+        )
+        if existing:
+            return IncidentEvent(**existing[0])
+
         now = time.time()
         inc_event = IncidentEvent(
             id=str(uuid.uuid4()),

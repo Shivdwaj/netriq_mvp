@@ -1,6 +1,7 @@
 import os
 import asyncio
 import ipaddress
+import re
 import time
 from typing import Dict, Any, Optional
 
@@ -10,11 +11,15 @@ from backend.response.firewall import get_firewall_adapter
 from backend.response.quarantine import QuarantineService
 from backend.response.whitelist import WhitelistManager
 from backend.response.response_logger import ResponseLogger
+from backend.response.exceptions import EnforcementAlreadyActiveError
+from backend.pipeline.identity_resolver import identity_resolver
 
 logger = get_logger(__name__)
 
 QUARANTINE_MAX_QUOTA_PER_HOUR = int(os.getenv("QUARANTINE_MAX_QUOTA_PER_HOUR", "10"))
 DEFAULT_QUARANTINE_EXPIRY_SECONDS = int(os.getenv("QUARANTINE_EXPIRY_SECONDS", "3600"))
+
+_MAC_REGEX = re.compile(r"^([0-9a-fA-F]{2}[:-]){5}([0-9a-fA-F]{2})$")
 
 
 class ResponseEngine:
@@ -53,6 +58,138 @@ class ResponseEngine:
             return True
         except ValueError:
             return False
+
+    def _is_valid_mac(self, mac_str: Optional[str]) -> bool:
+        """
+        Validates whether mac_str is a plausible, verified unicast 6-octet MAC address.
+        Strictly rejects broadcast (FF:FF:FF:FF:FF:FF), all-zeros (00:00:00:00:00:00),
+        multicast, incomplete octets, or unformatted strings.
+        """
+        if not mac_str or not isinstance(mac_str, str):
+            return False
+        cleaned = mac_str.strip().lower()
+        if cleaned in ("unknown", "none", "null", "undefined"):
+            return False
+        if cleaned in ("00:00:00:00:00:00", "00-00-00-00-00-00"):
+            return False
+        if cleaned in ("ff:ff:ff:ff:ff:ff", "ff-ff-ff-ff-ff-ff"):
+            return False
+        if cleaned.startswith("01:00:5e") or cleaned.startswith("33:33"):
+            return False
+
+        if not _MAC_REGEX.match(cleaned):
+            return False
+
+        parts = cleaned.replace("-", ":").split(":")
+        if len(parts) != 6:
+            return False
+        try:
+            # Check individual/group (multicast) bit on first octet
+            if int(parts[0], 16) & 1 == 1:
+                return False
+        except ValueError:
+            return False
+        return True
+
+    async def _verify_enforcement_active(self, adapter: Any, target_ip: str) -> bool:
+        """
+        Independently queries the adapter's state to verify the target IP is actively enforced.
+        """
+        if hasattr(adapter, "is_blocked"):
+            try:
+                res = adapter.is_blocked(target_ip)
+                if asyncio.iscoroutine(res):
+                    return await res
+                return bool(res)
+            except Exception:
+                pass
+        elif hasattr(adapter, "is_quarantined"):
+            try:
+                res = adapter.is_quarantined(target_ip)
+                if asyncio.iscoroutine(res):
+                    return await res
+                return bool(res)
+            except Exception:
+                pass
+        return False
+
+    async def _is_idempotent_success(self, exc: Exception, adapter: Any, target_ip: str) -> bool:
+        """
+        Strictly verifies if an enforcement error corresponds to an already-enforced state.
+        Requires either typed EnforcementAlreadyActiveError, HTTP 409 Conflict,
+        or an explicit target-bound enforcement message confirmed by adapter state check.
+        """
+        if isinstance(exc, EnforcementAlreadyActiveError):
+            return True
+
+        is_http_409 = hasattr(exc, "response") and getattr(exc.response, "status_code", None) == 409
+        msg = str(exc).lower()
+        has_specific_msg = any(
+            phrase in msg for phrase in [
+                f"ip {target_ip} is already blocked",
+                f"device {target_ip} is already quarantined",
+                f"rule already exists for {target_ip}",
+                "already in isolation"
+            ]
+        )
+
+        if is_http_409 or has_specific_msg:
+            if hasattr(adapter, "is_blocked") or hasattr(adapter, "is_quarantined"):
+                is_active = await self._verify_enforcement_active(adapter, target_ip)
+                if not is_active:
+                    logger.warning(
+                        f"[ResponseEngine] Adapter returned conflict for {target_ip}, "
+                        "but independent state check could not confirm active enforcement."
+                    )
+                    return False
+            return True
+
+        return False
+
+    async def _execute_with_retry(
+        self,
+        func,
+        *args,
+        max_retries: int = 2,
+        initial_delay: float = 0.1,
+        adapter: Any = None,
+        **kwargs
+    ) -> bool:
+        """
+        Executes a response enforcement call with automatic retries and typed idempotency checks.
+        Handles ambiguous timeouts by verifying when target state is already actively enforced.
+        """
+        last_exc = None
+        target_ip = args[0] if args else kwargs.get("ip_address", "")
+
+        for attempt in range(max_retries + 1):
+            try:
+                res = await func(*args, **kwargs)
+                if res:
+                    return True
+                if attempt < max_retries:
+                    logger.warning(
+                        f"[ResponseEngine] Response action returned False (attempt {attempt + 1}/{max_retries + 1}). Retrying in {initial_delay}s..."
+                    )
+                    await asyncio.sleep(initial_delay)
+            except Exception as e:
+                # Typed and verified idempotency check
+                if await self._is_idempotent_success(e, adapter, str(target_ip)):
+                    logger.info(f"[ResponseEngine] Idempotent success verified for {target_ip}: target already actively enforced.")
+                    return True
+
+                last_exc = e
+                if attempt < max_retries:
+                    logger.warning(
+                        f"[ResponseEngine] Response action failed with {type(e).__name__:s}: {e} (attempt {attempt + 1}/{max_retries + 1}). Retrying in {initial_delay}s..."
+                    )
+                    await asyncio.sleep(initial_delay)
+                else:
+                    logger.error(
+                        f"[ResponseEngine] Response action failed after {max_retries + 1} attempts: {e}"
+                    )
+                    raise last_exc
+        return False
 
     def _is_protected_infrastructure(self, target_ip: str, context: Dict[str, Any]) -> tuple[bool, str]:
         """
@@ -173,6 +310,42 @@ class ResponseEngine:
             asyncio.create_task(self._notify_incident_service(target_ip, prediction, action, False))
             return True
 
+        # Validate MAC identity before Layer 2 quarantine to prevent IP spoofing & switch port isolation
+        if action == Action.QUARANTINE:
+            resolved_device = identity_resolver.resolve(ip=target_ip)
+            has_valid_mac = self._is_valid_mac(target_mac)
+
+            if not has_valid_mac:
+                # Attempt to resolve authoritative MAC from identity resolver
+                if resolved_device and resolved_device.mac and self._is_valid_mac(resolved_device.mac):
+                    target_mac = resolved_device.mac
+                    logger.info(f"[ResponseEngine] Resolved authoritative MAC {target_mac} for target {target_ip} via IdentityResolver.")
+                else:
+                    logger.critical(
+                        f"[ResponseEngine] Suppressing Layer 2 quarantine for {target_ip}: "
+                        f"unverified or missing MAC address ('{target_mac}'). "
+                        "Preventing potential IP spoofing / switch port isolation."
+                    )
+                    await self.logger.log_action(
+                        action, target_ip, "Layer 2 MAC Unverified (Suppressed)", False, context
+                    )
+                    return False
+            else:
+                # Syntactically valid MAC supplied: independently verify against authoritative IdentityResolver
+                if resolved_device and resolved_device.is_managed and resolved_device.mac:
+                    cleaned_supplied = target_mac.strip().replace("-", ":").upper()
+                    cleaned_auth = resolved_device.mac.strip().replace("-", ":").upper()
+                    if cleaned_supplied != cleaned_auth:
+                        logger.critical(
+                            f"[ResponseEngine] MAC spoofing detected for {target_ip}! "
+                            f"Supplied MAC '{target_mac}' contradicts authoritative registered MAC '{resolved_device.mac}'. "
+                            "Suppressing quarantine to prevent isolating spoofed network host."
+                        )
+                        await self.logger.log_action(
+                            action, target_ip, "Layer 2 MAC Spoofing Mismatch (Suppressed)", False, context
+                        )
+                        return False
+
         # Check quarantine quota before executing Layer 2 quarantine
         if action == Action.QUARANTINE and not self._check_quarantine_quota(target_ip):
             logger.critical(f"[ResponseEngine] Quarantine quota limit ({QUARANTINE_MAX_QUOTA_PER_HOUR}/hr) exceeded. Suppressing automatic quarantine for {target_ip} to prevent network denial-of-service.")
@@ -192,7 +365,7 @@ class ResponseEngine:
             elif action == Action.RECOMMEND_BLOCK:
                 logger.info(f"Layer 1 action initiated: Recommending Firewall block for {target_ip}")
                 try:
-                    success = await self.firewall.block_ip(target_ip, reason)
+                    success = await self._execute_with_retry(self.firewall.block_ip, target_ip, reason, adapter=self.firewall)
                     outcome_msg = "Firewall Blocked" if success else "Firewall Block Failed"
                 except Exception as e:
                     logger.error(f"Firewall adapter failure during RECOMMEND_BLOCK: {e}")
@@ -202,7 +375,7 @@ class ResponseEngine:
             elif action == Action.QUARANTINE:
                 logger.warning(f"Layer 2 action initiated: Triggering Quarantine for internal threat {target_ip}")
                 try:
-                    success = await self.quarantine.quarantine_device(target_ip, target_mac, reason)
+                    success = await self._execute_with_retry(self.quarantine.quarantine_device, target_ip, target_mac, reason, adapter=self.quarantine)
                     if success:
                         self._record_quarantine_success(target_ip)
                         outcome_msg = f"Quarantined (Auto-Expires in {DEFAULT_QUARANTINE_EXPIRY_SECONDS}s)"

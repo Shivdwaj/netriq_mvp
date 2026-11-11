@@ -17,6 +17,7 @@ class DocumentNotFoundError(NetriqException): pass
 # --- Response & Network ---
 class FirewallUnreachableError(NetriqException): pass
 class QuarantineFailedError(NetriqException): pass
+class EnforcementAlreadyActiveError(NetriqException): pass
 
 # --- API & Validation ---
 class ValidationError(NetriqException): pass

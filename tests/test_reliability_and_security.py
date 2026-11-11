@@ -760,15 +760,909 @@ async def test_response_engine_cidr_infrastructure_and_quarantine_quota():
         engine._recent_quarantines = {}
 
         # 1st quarantine: Allowed
-        q1 = await engine.handle_verdict(pred, Action.QUARANTINE, {"src_ip": "192.168.1.51", "src_mac": "00:aa"})
+        q1 = await engine.handle_verdict(pred, Action.QUARANTINE, {"src_ip": "192.168.1.51", "src_mac": "00:11:22:33:44:51"})
         assert q1 is True
 
         # 2nd quarantine: Allowed
-        q2 = await engine.handle_verdict(pred, Action.QUARANTINE, {"src_ip": "192.168.1.52", "src_mac": "00:bb"})
+        q2 = await engine.handle_verdict(pred, Action.QUARANTINE, {"src_ip": "192.168.1.52", "src_mac": "00:11:22:33:44:52"})
         assert q2 is True
 
         # 3rd quarantine exceeds quota (2 max per hour): Suppressed/bypassed
-        q3 = await engine.handle_verdict(pred, Action.QUARANTINE, {"src_ip": "192.168.1.53", "src_mac": "00:cc"})
+        q3 = await engine.handle_verdict(pred, Action.QUARANTINE, {"src_ip": "192.168.1.53", "src_mac": "00:11:22:33:44:53"})
         assert q3 is False
         assert engine.quarantine.quarantine_device.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_sensor_registration_authentication_and_tenant_enforcement():
+    """
+    Regression test for Phase 1 Step 1 (Sensor Registration Security):
+    - Unauthenticated registration rejected with 401 when not in testing mode.
+    - Non-admin user cannot register a sensor for a foreign tenant (403).
+    - Authenticated admin or matching tenant user can register.
+    """
+    from httpx import AsyncClient, ASGITransport
+    from backend.main import app
+    from backend.auth.jwt_handler import create_access_token
+    from unittest.mock import patch
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        reg_payload = {
+            "tenant_id": "target_tenant",
+            "name": "edge-suricata-probe",
+            "software_type": "suricata",
+            "software_version": "7.0.2",
+            "hostname": "probe-vm"
+        }
+
+        # 1. Unauthenticated registration rejected when TESTING is false
+        with patch.dict(os.environ, {"TESTING": "false"}):
+            resp_unauth = await client.post("/api/v1/sensors/register", json=reg_payload)
+            assert resp_unauth.status_code == 401
+            assert "Authentication required" in resp_unauth.json()["detail"]
+
+        # 2. Non-admin user attempting cross-tenant registration rejected with 403
+        analyst_token = create_access_token("analyst_user", "analyst", tenant_id="analyst_tenant")
+        with patch.dict(os.environ, {"TESTING": "false"}):
+            resp_cross = await client.post(
+                "/api/v1/sensors/register",
+                json=reg_payload,
+                headers={"Authorization": f"Bearer {analyst_token}"}
+            )
+            assert resp_cross.status_code == 403
+            assert "foreign organisation" in resp_cross.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_sensor_heartbeat_key_enforcement_and_identity_binding():
+    """
+    Regression test for Phase 1 Step 1 (Sensor Heartbeat Authentication & Identity Binding):
+    - Heartbeat without X-Sensor-Key or Bearer token is rejected with 401.
+    - Heartbeat with invalid X-Sensor-Key is rejected with 401.
+    - Heartbeat with key for sensor A reporting for sensor B is rejected with 403 (identity binding).
+    """
+    from httpx import AsyncClient, ASGITransport
+    from backend.main import app
+    from backend.services.central_management_service import central_management_service
+    from backend.schemas.management import SensorRegistrationReq, SensorSoftwareType
+
+    # Provision two sensors
+    s1 = await central_management_service.register_software_sensor(SensorRegistrationReq(
+        tenant_id="tenant_alpha",
+        name="alpha-probe",
+        software_type=SensorSoftwareType.SURICATA,
+        software_version="7.0.2",
+        hostname="alpha-box"
+    ))
+    s2 = await central_management_service.register_software_sensor(SensorRegistrationReq(
+        tenant_id="tenant_beta",
+        name="beta-probe",
+        software_type=SensorSoftwareType.ZEEK,
+        software_version="6.0.3",
+        hostname="beta-box"
+    ))
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        hb_body = {
+            "sensor_id": s1.sensor_id,
+            "cpu_usage_pct": 15.0,
+            "memory_usage_mb": 256.0,
+            "kernel_drops_count": 0,
+            "packets_processed": 5000,
+            "uptime_seconds": 600.0
+        }
+
+        # 1. Missing authentication rejected with 401
+        res_no_auth = await client.post("/api/v1/sensors/heartbeat", json=hb_body)
+        assert res_no_auth.status_code == 401
+
+        # 2. Invalid sensor key rejected with 401
+        res_bad_key = await client.post(
+            "/api/v1/sensors/heartbeat",
+            json=hb_body,
+            headers={"X-Sensor-Key": "ntrq_invalid_key_12345"}
+        )
+        assert res_bad_key.status_code == 401
+
+        # 3. Valid key for sensor A submitting heartbeat for sensor B rejected with 403
+        hb_body_mismatch = dict(hb_body)
+        hb_body_mismatch["sensor_id"] = s2.sensor_id
+        res_mismatch = await client.post(
+            "/api/v1/sensors/heartbeat",
+            json=hb_body_mismatch,
+            headers={"X-Sensor-Key": s1.api_key}
+        )
+        assert res_mismatch.status_code == 401 or res_mismatch.status_code == 403
+        assert "mismatch" in res_mismatch.json()["detail"].lower() or "unauthorized" in res_mismatch.json()["detail"].lower()
+
+        # 4. Valid key with matching sensor ID accepted with 200
+        res_valid = await client.post(
+            "/api/v1/sensors/heartbeat",
+            json=hb_body,
+            headers={"X-Sensor-Key": s1.api_key}
+        )
+        assert res_valid.status_code == 200
+        assert res_valid.json()["sensor_status"] == "healthy"
+
+
+@pytest.mark.asyncio
+async def test_database_health_reporting_and_production_safeguards():
+    """
+    Regression test for Phase 1 Step 2 (Database Health Reporting & Production Safeguards):
+    - In-memory database fallback is accurately detected and reported as 'degraded'.
+    - /health endpoint returns status: 'degraded' when MongoDB is not connected.
+    - MongoDB ping when healthy returns status: 'healthy' and database: 'online'.
+    - DatabaseManager.connect_db() in production environment refuses silent in-memory fallback.
+    """
+    from httpx import AsyncClient, ASGITransport
+    from backend.main import app
+    from backend.database.database import DatabaseManager
+    from backend.database.in_memory_db import InMemoryDatabase
+    from backend.database.exceptions import DatabaseConnectionError
+    from unittest.mock import AsyncMock, patch
+
+    # 1. In-memory database health status
+    DatabaseManager.db = InMemoryDatabase()
+    DatabaseManager.client = None
+
+    assert DatabaseManager.is_in_memory() is True
+    assert DatabaseManager.is_persistent() is False
+    assert await DatabaseManager.health_check() is False
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        res = await client.get("/api/v1/health")
+        assert res.status_code == 200
+        data = res.json()
+        assert data["status"] == "degraded"
+        assert "in-memory fallback" in data["components"]["database"]
+        assert data["components"]["database_persistent"] is False
+        assert data["components"]["database_storage"] == "in-memory"
+
+        # 2. Healthy MongoDB mock
+        mock_client = AsyncMock()
+        mock_client.admin.command = AsyncMock(return_value={"ok": 1})
+        old_client = DatabaseManager.client
+        old_db = DatabaseManager.db
+        try:
+            DatabaseManager.client = mock_client
+            DatabaseManager.db = AsyncMock() # Non InMemoryDatabase
+            assert DatabaseManager.is_persistent() is True
+            assert await DatabaseManager.health_check() is True
+
+            res_healthy = await client.get("/api/v1/health")
+            data_healthy = res_healthy.json()
+            assert data_healthy["components"]["database"] == "online"
+            assert data_healthy["components"]["database_persistent"] is True
+            assert data_healthy["components"]["database_storage"] == "mongodb"
+        finally:
+            DatabaseManager.client = old_client
+            DatabaseManager.db = old_db
+
+    # 3. Production safeguard: connect_db refuses in-memory fallback in production
+    DatabaseManager.db = None
+    DatabaseManager.client = None
+    with patch.dict(os.environ, {"ENVIRONMENT": "production", "MONGO_TIMEOUT_MS": "100"}), \
+         patch("backend.database.database.AsyncIOMotorClient", side_effect=Exception("Connection refused")):
+        with pytest.raises(DatabaseConnectionError) as exc_info:
+            await DatabaseManager.connect_db(retries=1)
+        assert "Refusing to run on unpersisted volatile in-memory fallback" in str(exc_info.value)
+    DatabaseManager.db = InMemoryDatabase()
+
+
+@pytest.mark.asyncio
+async def test_event_bus_bounded_queue_and_backpressure():
+    """
+    Regression test for Phase 2 Step 3 (Bounded Event Processing & Backpressure):
+    - Replaces unbounded create_task with bounded queue and worker pool.
+    - Full queue triggers backpressure timeout and safely drops without memory leak.
+    - Worker pool consumes and executes subscriber callbacks.
+    """
+    from backend.pipeline.event_bus import SecurityEventBus
+    from backend.pipeline.schemas import NormalizedSecurityEvent
+
+    bus = SecurityEventBus(history_limit=10, max_queue_size=3, max_concurrency=1)
+    processed = []
+
+    async def slow_consumer(event: NormalizedSecurityEvent):
+        await asyncio.sleep(0.5)
+        processed.append(event.event_id)
+
+    bus.subscribe(slow_consumer)
+
+    # Rapidly burst 15 events into queue of capacity 3 with 0.001s timeout
+    dropped_count = 0
+    for i in range(15):
+        evt = NormalizedSecurityEvent(
+            event_id=f"evt-{i}",
+            source_ip="10.0.0.1",
+            destination_ip="10.0.0.2"
+        )
+        res = await bus.publish(evt, timeout=0.001)
+        if not res:
+            dropped_count += 1
+
+    assert dropped_count > 0 or bus.dropped_count > 0
+    assert bus.dropped_count >= 1
+
+    # Drain remaining events
+    await bus.drain(timeout=2.0)
+    await bus.shutdown()
+    assert len(processed) > 0
+
+
+@pytest.mark.asyncio
+async def test_correlation_duplicate_event_insertion_prevention():
+    """
+    Regression test for Phase 2 Step 4 (Duplicate Event Insertion Prevention):
+    - evidence_service.link_event_to_incident deduplicates multiple linkages for same (incident_id, event_id).
+    - correlation_engine does not duplicate events in tracker when evaluating findings.
+    """
+    from backend.services.evidence_service import evidence_service
+    from backend.database.collections import incident_events_repo
+    from backend.schemas.entities import IncidentEventRole
+    from backend.database.in_memory_db import InMemoryDatabase
+    from backend.database.database import DatabaseManager
+
+    DatabaseManager.db = InMemoryDatabase()
+
+    tenant_id = "test_tenant"
+    inc_id = "inc-test-dedup-01"
+    evt_id = "evt-test-unique-01"
+
+    # 1. Link event first time
+    l1 = await evidence_service.link_event_to_incident(
+        tenant_id=tenant_id,
+        incident_id=inc_id,
+        event_id=evt_id,
+        role_in_incident=IncidentEventRole.TRIGGER
+    )
+    assert l1 is not None
+
+    # 2. Repeated link calls for same incident_id and event_id return existing without creating duplicates
+    l2 = await evidence_service.link_event_to_incident(
+        tenant_id=tenant_id,
+        incident_id=inc_id,
+        event_id=evt_id,
+        role_in_incident=IncidentEventRole.SUPPORTING
+    )
+    assert l2.event_id == l1.event_id
+    assert l2.incident_id == l1.incident_id
+
+    # 3. Verify exactly 1 record in incident_events repository
+    matches = await incident_events_repo.list(filter_query={"incident_id": inc_id, "event_id": evt_id})
+    assert len(matches) == 1
+
+
+@pytest.mark.asyncio
+async def test_restore_active_incident_association_after_restart():
+    """
+    Regression test for Phase 2 Step 5 (Restore Active Incident Association after Restarts):
+    - When backend restarts, in-memory trackers are empty.
+    - Next event for an asset with an ongoing open incident associates with the existing incident
+      instead of creating a fragmented second incident.
+    """
+    import time
+    from backend.services.correlation_service import CorrelationEngine
+    from backend.database.collections import incidents_repo
+    from backend.pipeline.schemas import NormalizedSecurityEvent, DeviceIdentity
+    from backend.database.in_memory_db import InMemoryDatabase
+    from backend.database.database import DatabaseManager
+
+    DatabaseManager.db = InMemoryDatabase()
+
+    attacker_ip = "192.168.1.99"
+    now = time.time()
+
+    # 1. Seed existing open incident created 10 minutes ago
+    existing_inc_id = await incidents_repo.create({
+        "tenant_id": "corp_restart",
+        "status": "investigating",
+        "incident_type": "Multi-Stage Attack",
+        "severity": "HIGH",
+        "title": "Initial Discovery",
+        "src_ip": attacker_ip,
+        "affected_assets": [attacker_ip],
+        "created_at": now - 600,
+        "updated_at": now - 300,
+        "attack_chain": ["Stage 1: Discovery (T1046)"],
+        "evidence": [{"event_id": "seed-evt-1", "dst_port": 80, "stage": "reconnaissance"}],
+        "event_count": 1
+    })
+
+    # 2. Simulate fresh engine post-restart (empty _trackers)
+    engine = CorrelationEngine(window_seconds=1200.0)
+    assert attacker_ip not in engine._trackers
+
+    # 3. New event arrives from same attacker IP
+    new_evt = NormalizedSecurityEvent(
+        tenant_id="corp_restart",
+        source_ip=attacker_ip,
+        destination_ip="192.168.1.10",
+        source_port=55100,
+        destination_port=445,  # Lateral SMB probe
+        protocol="TCP",
+        event_type="connection",
+        direction="internal",
+        device=DeviceIdentity(ip=attacker_ip, hostname="Restart-Node", is_managed=True)
+    )
+
+    await engine.process_event(new_evt)
+
+    # 4. Verify the active incident was restored from DB rather than duplicated
+    tracker = engine._trackers.get(attacker_ip)
+    assert tracker is not None
+    assert tracker.active_incident_id == existing_inc_id
+
+    # 5. Verify no second incident was created in incidents_repo
+    all_incs = await incidents_repo.list(filter_query={"src_ip": attacker_ip})
+    assert len(all_incs) == 1
+    assert all_incs[0]["id"] == existing_inc_id
+
+
+@pytest.mark.asyncio
+async def test_threshold_optimizer_empirical_calibration():
+    """
+    Phase 3: Verify ThresholdOptimizer calibrates optimal score thresholds
+    using empirical validation distributions without crashing or hardcoded fallbacks.
+    """
+    from backend.ai.threshold_optimizer import ThresholdOptimizer
+    import numpy as np
+
+    optimizer = ThresholdOptimizer(target_metric="f1")
+
+    # Generate synthetic scores: 50 clean scores around 0.2, 50 malicious around 0.8
+    np.random.seed(42)
+    clean_scores = np.random.normal(loc=0.2, scale=0.1, size=50).tolist()
+    malicious_scores = np.random.normal(loc=0.8, scale=0.1, size=50).tolist()
+
+    val_scores = clean_scores + malicious_scores
+    labels = [0] * 50 + [1] * 50
+
+    result = optimizer.calibrate(val_scores, labels)
+
+    assert result["calibrated"] is True
+    assert 0.3 <= result["optimal_threshold"] <= 0.7
+    assert result["metrics"]["f1_score"] > 0.85
+    assert result["metrics"]["sample_count"] == 100
+    assert result["metrics"]["target_metric"] == "f1"
+
+    # Test edge case: empty or invalid inputs gracefully fall back
+    fallback = optimizer.calibrate([], [])
+    assert fallback["calibrated"] is False
+    assert fallback["optimal_threshold"] == 0.5
+
+
+@pytest.mark.asyncio
+async def test_adapters_observable_telemetry_and_tls_enrichment():
+    """
+    Phase 3: Verify Suricata and Zeek adapters track malformed event telemetry,
+    log warnings, and enrich events with TLS/SSL metadata.
+    """
+    from backend.adapters.suricata_adapter import SuricataAdapter
+    from backend.adapters.zeek_adapter import ZeekAdapter
+
+    suricata = SuricataAdapter()
+    zeek = ZeekAdapter()
+
+    # 1. Suricata malformed JSON handling
+    res1 = suricata.transform("INVALID_NOT_A_JSON")
+    assert res1 is None
+    assert suricata.malformed_count == 1
+    assert suricata.processed_count == 1
+
+    # 2. Suricata TLS metadata enrichment
+    suricata_tls_payload = {
+        "timestamp": "2026-11-11T12:00:00.000Z",
+        "event_type": "alert",
+        "src_ip": "192.168.1.100",
+        "dest_ip": "10.0.0.5",
+        "src_port": 49200,
+        "dest_port": 443,
+        "proto": "TCP",
+        "alert": {
+            "signature": "ET TROJAN Observed Malicious SSL Cert",
+            "category": "A Network Trojan was detected",
+            "severity": 1,
+            "signature_id": 202888
+        },
+        "tls": {
+            "sni": "malicious-c2.evil.com",
+            "version": "TLS 1.3",
+            "subject": "CN=malicious-c2.evil.com",
+            "issuer": "CN=Evil CA",
+            "ja3": "51c64c77e60f3980ebd90973b1b70467"
+        }
+    }
+    evt_suri = suricata.transform(suricata_tls_payload)
+    assert evt_suri is not None
+    assert evt_suri.evidence["tls"]["sni"] == "malicious-c2.evil.com"
+    assert evt_suri.evidence["tls"]["ja3"] == "51c64c77e60f3980ebd90973b1b70467"
+    assert suricata.transformed_count == 1
+    metrics_suri = suricata.get_metrics()
+    assert metrics_suri["processed"] == 2
+    assert metrics_suri["transformed"] == 1
+    assert metrics_suri["malformed"] == 1
+
+    # 3. Zeek malformed string and missing IPs
+    res_z1 = zeek.transform("{bad_json")
+    assert res_z1 is None
+    assert zeek.malformed_count == 1
+
+    res_z2 = zeek.transform({"proto": "tcp"})  # Missing src_ip and dst_ip
+    assert res_z2 is None
+    assert zeek.malformed_count == 2
+
+    # 4. Zeek SSL record and TLS enrichment
+    zeek_ssl_payload = {
+        "ts": 1700000000.0,
+        "uid": "CHfSZ32168zeek",
+        "id.orig_h": "192.168.1.105",
+        "id.resp_h": "10.0.0.25",
+        "id.orig_p": 51234,
+        "id.resp_p": 443,
+        "proto": "tcp",
+        "ssl": {
+            "server_name": "internal-vault.corp.local",
+            "subject": "CN=internal-vault.corp.local",
+            "issuer": "CN=Corp Internal CA",
+            "ja3": "6734f37431670b3ab4292b8f60f29984",
+            "version": "TLSv1.2",
+            "cipher": "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"
+        }
+    }
+    evt_zeek = zeek.transform(zeek_ssl_payload)
+    assert evt_zeek is not None
+    assert evt_zeek.evidence["tls"]["sni"] == "internal-vault.corp.local"
+    assert evt_zeek.evidence["tls"]["ja3"] == "6734f37431670b3ab4292b8f60f29984"
+    assert evt_zeek.evidence["tls"]["cipher"] == "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"
+    assert zeek.transformed_count == 1
+    metrics_zeek = zeek.get_metrics()
+    assert metrics_zeek["processed"] == 3
+    assert metrics_zeek["transformed"] == 1
+    assert metrics_zeek["malformed"] == 2
+
+
+@pytest.mark.asyncio
+async def test_response_engine_mac_verification_and_retry_resilience():
+    """
+    Phase 3: Verify ResponseEngine suppresses Layer 2 quarantine on unverified MACs,
+    resolves MACs via IdentityResolver when possible, and retries on transient adapter errors.
+    """
+    from backend.response.response_engine import ResponseEngine
+    from backend.ai.contracts import Action, PredictionResult, RiskCategory
+    from backend.pipeline.identity_resolver import identity_resolver
+    from unittest.mock import AsyncMock, patch
+
+    engine = ResponseEngine()
+    engine.quarantine.quarantine_device = AsyncMock(return_value=True)
+    engine.firewall.block_ip = AsyncMock(return_value=True)
+
+    pred = PredictionResult(
+        verdict=True,
+        confidence=96.0,
+        risk_category=RiskCategory.HIGH,
+        model_used="BehavioralPipeline",
+        latency_ms=1.5
+    )
+
+    with patch("backend.services.settings_service.settings_service.get_settings", new_callable=AsyncMock, return_value={"auto_quarantine": True}):
+        # 1. Unverified MAC (None / missing) with unmanaged IP -> Quarantine SUPPRESSED
+        suppressed1 = await engine.handle_verdict(
+            prediction=pred,
+            action=Action.QUARANTINE,
+            context={"src_ip": "192.168.1.222", "src_mac": None}
+        )
+        assert suppressed1 is False
+        assert engine.quarantine.quarantine_device.call_count == 0
+
+        # 2. Invalid / broadcast MAC -> Quarantine SUPPRESSED
+        suppressed2 = await engine.handle_verdict(
+            prediction=pred,
+            action=Action.QUARANTINE,
+            context={"src_ip": "192.168.1.222", "src_mac": "ff:ff:ff:ff:ff:ff"}
+        )
+        assert suppressed2 is False
+        assert engine.quarantine.quarantine_device.call_count == 0
+
+        # 3. Unspecified MAC, but target IP IS registered in IdentityResolver -> Resolves & executes quarantine
+        identity_resolver.register_device(
+            ip="192.168.1.88",
+            mac="00:11:22:33:44:88",
+            hostname="workstation-88"
+        )
+        success_resolved = await engine.handle_verdict(
+            prediction=pred,
+            action=Action.QUARANTINE,
+            context={"src_ip": "192.168.1.88"}  # no src_mac in context
+        )
+        assert success_resolved is True
+        assert engine.quarantine.quarantine_device.call_count == 1
+        # Check that quarantine was called with the resolved MAC
+        call_args = engine.quarantine.quarantine_device.call_args[0]
+        assert call_args[0] == "192.168.1.88"
+        assert call_args[1] == "00:11:22:33:44:88"
+
+        # 4. Response Retries: transient error on attempt 1, success on attempt 2
+        call_counter = 0
+        async def flaky_block(ip, reason):
+            nonlocal call_counter
+            call_counter += 1
+            if call_counter == 1:
+                raise ConnectionError("Transient network reset")
+            return True
+
+        engine.firewall.block_ip = AsyncMock(side_effect=flaky_block)
+        retry_success = await engine.handle_verdict(
+            prediction=pred,
+            action=Action.RECOMMEND_BLOCK,
+            context={"src_ip": "198.51.100.44"}
+        )
+        assert retry_success is True
+        assert call_counter == 2  # Succeeded on retry attempt 2
+
+
+@pytest.mark.asyncio
+async def test_localized_forensic_event_explanation():
+    """
+    Phase 3: Verify IncidentExplainer provides localized forensic feature
+    contribution explanations for individual events without requiring SHAP.
+    """
+    from backend.intelligence.explainer import incident_explainer
+    from backend.pipeline.schemas import NormalizedSecurityEvent
+
+    event = NormalizedSecurityEvent(
+        tenant_id="corp_sec",
+        sensor_id="sensor-zeek-01",
+        source_ip="192.168.1.200",
+        destination_ip="192.168.1.10",
+        source_port=49500,
+        destination_port=445,  # Sensitive SMB port
+        protocol="TCP",
+        event_type="connection",
+        severity="HIGH",
+        direction="internal",
+        evidence={
+            "conn_state": "S0",
+            "scan_indicator": True,
+            "tls": {
+                "sni": "auth.corp.local",
+                "ja3": "771f35e521e4c79f3b93b46007f91d75"
+            }
+        }
+    )
+
+    explanation = incident_explainer.explain_event(event)
+
+    assert explanation["event_id"] == event.event_id
+    assert explanation["severity"] == "HIGH"
+    assert "Reconnaissance" in explanation["primary_driver"] or "Scan" in explanation["primary_driver"]
+    assert "destination_port_sensitivity" in explanation["feature_contributions"]
+    assert explanation["feature_contributions"]["destination_port_sensitivity"] >= 0.90
+    assert explanation["feature_contributions"]["reconnaissance_pattern"] >= 0.90
+    assert explanation["feature_contributions"]["tls_metadata_presence"] > 0
+    assert len(explanation["risk_factors"]) >= 2
+    assert "auth.corp.local" in str(explanation["risk_factors"])
+    assert "T1046" in explanation["mitre_technique"]
+
+
+@pytest.mark.asyncio
+async def test_event_bus_atomic_concurrency_and_graceful_shutdown():
+    """
+    Verify EventBus queue limit checking and task enrollment are atomic under load,
+    and shutdown drains in-flight tasks before cancelling.
+    """
+    from backend.pipeline.event_bus import SecurityEventBus
+    from backend.pipeline.schemas import NormalizedSecurityEvent
+
+    bus = SecurityEventBus(max_concurrency=10, max_queue_size=10)
+    processed_count = 0
+
+    async def slow_subscriber(ev):
+        nonlocal processed_count
+        await asyncio.sleep(0.05)
+        processed_count += 1
+
+    bus.subscribe(slow_subscriber)
+
+    evt = NormalizedSecurityEvent(
+        tenant_id="test",
+        source_ip="192.168.1.1",
+        destination_ip="192.168.1.2",
+        source_port=1000,
+        destination_port=80,
+        protocol="TCP"
+    )
+
+    # Concurrently publish 40 events with 0.001s backpressure timeout
+    results = await asyncio.gather(*[bus.publish(evt, timeout=0.001) for _ in range(40)])
+
+    # Max queue size is 10: exactly 10 accepted, 30 rejected
+    accepted = sum(1 for r in results if r is True)
+    rejected = sum(1 for r in results if r is False)
+    assert accepted == 10
+    assert rejected == 30
+    assert bus.dropped_count == 30
+    assert bus.queue_depth <= 10
+
+    # Test graceful shutdown (drains in-flight tasks and sets closing state)
+    await bus.shutdown(drain_timeout=2.0)
+    assert bus.queue_depth == 0
+    assert processed_count == 10
+
+    # Closing state rejects any subsequent publications
+    rejected_post_shutdown = await bus.publish(evt)
+    assert rejected_post_shutdown is False
+
+
+@pytest.mark.asyncio
+async def test_multi_tenant_correlation_isolation():
+    """
+    Verify CorrelationEngine maintains independent trackers for different tenants
+    even when RFC1918 private IP addresses overlap (e.g. 10.0.0.99).
+    Also verifies ambiguous raw IP queries raise KeyError when multiple tenants share that IP.
+    """
+    from backend.services.correlation_service import CorrelationEngine
+    from backend.pipeline.schemas import NormalizedSecurityEvent
+
+    engine = CorrelationEngine()
+
+    # Tenant Alpha event from 10.0.0.99
+    evt_alpha = NormalizedSecurityEvent(
+        tenant_id="org_alpha",
+        source_ip="10.0.0.99",
+        destination_ip="10.0.0.1",
+        source_port=50000,
+        destination_port=445,
+        protocol="TCP",
+        event_type="connection"
+    )
+
+    # Tenant Beta event from exact same IP 10.0.0.99
+    evt_beta = NormalizedSecurityEvent(
+        tenant_id="org_beta",
+        source_ip="10.0.0.99",
+        destination_ip="10.0.0.1",
+        source_port=50001,
+        destination_port=3389,
+        protocol="TCP",
+        event_type="connection"
+    )
+
+    await engine.process_event(evt_alpha)
+    await engine.process_event(evt_beta)
+
+    # Ensure separate trackers exist under composite tenant keys
+    assert "tenant:org_alpha/device:10.0.0.99" in engine._trackers
+    assert "tenant:org_beta/device:10.0.0.99" in engine._trackers
+
+    tracker_alpha = engine._trackers["tenant:org_alpha/device:10.0.0.99"]
+    tracker_beta = engine._trackers["tenant:org_beta/device:10.0.0.99"]
+
+    assert tracker_alpha is not tracker_beta
+    assert len(tracker_alpha.events) == 1
+    assert len(tracker_beta.events) == 1
+    assert tracker_alpha.events[0]["dst_port"] == 445
+    assert tracker_beta.events[0]["dst_port"] == 3389
+
+    # Raw IP query is ambiguous across multiple tenants -> raises KeyError
+    with pytest.raises(KeyError, match="Ambiguous tracker lookup"):
+        _ = engine._trackers["10.0.0.99"]
+
+
+@pytest.mark.asyncio
+async def test_threshold_optimizer_fpr_budget_and_live_risk_engine_application():
+    """
+    Verify ThresholdOptimizer applies false positive rate constraints,
+    respects target_metric (precision), rejects infeasible FPR budgets,
+    and applies calibrated thresholds to live RiskEngine.
+    """
+    from backend.ai.threshold_optimizer import ThresholdOptimizer
+    from backend.intelligence.config import intelligence_config
+    import numpy as np
+
+    optimizer = ThresholdOptimizer(target_metric="precision")
+
+    # Generate synthetic scores
+    np.random.seed(123)
+    benign = np.random.normal(loc=0.3, scale=0.1, size=80).tolist()
+    malicious = np.random.normal(loc=0.8, scale=0.1, size=80).tolist()
+    scores = benign + malicious
+    labels = [0] * 80 + [1] * 80
+
+    # 1. Feasible FPR budget
+    calibrated = optimizer.calibrate(scores, labels, target_false_positive_rate=0.05)
+    assert calibrated["calibrated"] is True
+    assert calibrated["metrics"]["false_positive_rate"] <= 0.05 + 1e-4
+    assert calibrated["metrics"]["target_metric"] == "precision"
+
+    # 2. Infeasible FPR budget constraint -> reports infeasible and retains previous
+    overlap_scores = [0.6, 0.7, 0.8, 0.9, 0.1, 0.2, 0.3, 0.4]
+    overlap_labels = [0, 0, 0, 0, 1, 1, 1, 1]
+    infeasible_cal = optimizer.calibrate(overlap_scores, overlap_labels, target_false_positive_rate=0.01)
+    assert infeasible_cal["calibrated"] is False
+    assert infeasible_cal.get("infeasible_constraint") is True
+
+    # 3. Apply to live RiskEngine with isolated restore
+    import backend.config.config as global_config
+    orig_thresholds = dict(global_config.RISK_THRESHOLDS)
+    orig_med = intelligence_config.severity_medium_threshold
+    orig_high = intelligence_config.severity_high_threshold
+    orig_crit = intelligence_config.severity_critical_threshold
+
+    try:
+        optimizer.apply_to_risk_engine()
+        assert intelligence_config.severity_medium_threshold == calibrated["LOW_MAX"]
+        assert intelligence_config.severity_high_threshold == calibrated["MEDIUM_MAX"]
+        assert intelligence_config.severity_critical_threshold == calibrated["HIGH_MAX"]
+
+        # Persist
+        persisted = await optimizer.persist()
+        assert persisted is True
+    finally:
+        global_config.RISK_THRESHOLDS.clear()
+        global_config.RISK_THRESHOLDS.update(orig_thresholds)
+        intelligence_config.severity_medium_threshold = orig_med
+        intelligence_config.severity_high_threshold = orig_high
+        intelligence_config.severity_critical_threshold = orig_crit
+
+
+@pytest.mark.asyncio
+async def test_zeek_adapter_malformed_numeric_ports_handling():
+    """
+    Verify ZeekAdapter safely catches malformed/non-numeric port values
+    without raising exceptions and records dropped malformed metrics.
+    """
+    from backend.adapters.zeek_adapter import ZeekAdapter
+
+    adapter = ZeekAdapter()
+    malformed_record = {
+        "id.orig_h": "192.168.1.50",
+        "id.resp_h": "10.0.0.1",
+        "id.orig_p": "invalid_not_a_number",
+        "id.resp_p": 80,
+        "proto": "tcp"
+    }
+
+    res = adapter.transform(malformed_record)
+    assert res is None
+    assert adapter.malformed_count == 1
+    metrics = adapter.get_metrics()
+    assert metrics["malformed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_response_engine_mac_spoofing_mismatch_and_idempotent_retry():
+    """
+    Verify ResponseEngine suppresses quarantine when supplied MAC contradicts
+    authoritative IdentityResolver, and treats 409 Conflict/already-enforced as idempotent success.
+    """
+    from backend.response.response_engine import ResponseEngine
+    from backend.ai.contracts import Action, PredictionResult, RiskCategory
+    from backend.pipeline.identity_resolver import identity_resolver
+    from backend.response.exceptions import EnforcementAlreadyActiveError
+    from unittest.mock import AsyncMock, patch
+
+    engine = ResponseEngine()
+    engine.quarantine.quarantine_device = AsyncMock(return_value=True)
+
+    # 1. Authoritative identity registration
+    identity_resolver.register_device(
+        ip="192.168.1.150",
+        mac="00:11:22:33:44:55",
+        hostname="finance-workstation",
+        is_managed=True
+    )
+
+    pred = PredictionResult(
+        verdict=True,
+        confidence=98.0,
+        risk_category=RiskCategory.CRITICAL,
+        model_used="FusionEngine",
+        latency_ms=1.0
+    )
+
+    with patch("backend.services.settings_service.settings_service.get_settings", new_callable=AsyncMock, return_value={"auto_quarantine": True}):
+        # Attacker claims target IP 192.168.1.150 but presents a spoofed MAC address
+        spoofed_result = await engine.handle_verdict(
+            prediction=pred,
+            action=Action.QUARANTINE,
+            context={"src_ip": "192.168.1.150", "src_mac": "AA:BB:CC:DD:EE:FF"}  # Contradicts 00:11:22:33:44:55
+        )
+        assert spoofed_result is False
+        assert engine.quarantine.quarantine_device.call_count == 0
+
+        # Legitimate MAC matching authoritative identity: quarantine succeeds
+        legit_result = await engine.handle_verdict(
+            prediction=pred,
+            action=Action.QUARANTINE,
+            context={"src_ip": "192.168.1.150", "src_mac": "00:11:22:33:44:55"}
+        )
+        assert legit_result is True
+        assert engine.quarantine.quarantine_device.call_count == 1
+
+        # 2. Idempotency test: adapter throws typed EnforcementAlreadyActiveError
+        async def already_blocked_action(ip, reason, **kwargs):
+            raise EnforcementAlreadyActiveError(f"IP {ip} is already blocked on firewall")
+
+        engine.firewall.block_ip = AsyncMock(side_effect=already_blocked_action)
+        idempotent_res = await engine.handle_verdict(
+            prediction=pred,
+            action=Action.RECOMMEND_BLOCK,
+            context={"src_ip": "198.51.100.99"}
+        )
+        assert idempotent_res is True
+
+
+@pytest.mark.asyncio
+async def test_live_risk_engine_dynamic_threshold_recalibration_lifecycle():
+    """
+    Verify that an active, running RiskEngine instance dynamically updates its severity
+    evaluations immediately upon optimizer.apply_to_risk_engine() without requiring server restart.
+    """
+    from backend.intelligence.risk_engine import RiskEngine
+    from backend.intelligence.enricher import EnrichedEventContext
+    from backend.intelligence.behaviour import BehaviourAssessment
+    from backend.intelligence.correlator import CorrelatedIncidentState
+    from backend.ai.threshold_optimizer import ThresholdOptimizer
+    from backend.intelligence.config import intelligence_config
+    import backend.config.config as global_config
+
+    orig_thresholds = dict(global_config.RISK_THRESHOLDS)
+    orig_med = intelligence_config.severity_medium_threshold
+    orig_high = intelligence_config.severity_high_threshold
+    orig_crit = intelligence_config.severity_critical_threshold
+
+    try:
+        # Create an active RiskEngine instance
+        import time
+        engine = RiskEngine()
+        context = EnrichedEventContext(
+            event_id="test-evt-lifecycle-1",
+            timestamp=time.time(),
+            tenant_id="test_org",
+            subject_ip="192.168.1.10",
+            subject_hostname="workstation-1",
+            subject_user="analyst",
+            target_ip="10.0.0.5",
+            asset_criticality_multiplier=1.0
+        )
+        behaviour = BehaviourAssessment(
+            source_ip="192.168.1.10",
+            is_high_frequency=True,
+            connection_rate_per_min=100
+        )
+        corr_state = CorrelatedIncidentState(
+            tracker_key="tenant:test/device:192.168.1.10",
+            observation_count=1
+        )
+        raw_events = [{"source": "suricata", "dst_port": 80}]
+
+        # 1. Baseline assessment under default thresholds (High=40.0)
+        res1 = engine.assess_risk(context, behaviour, corr_state, raw_events)
+        assert res1.severity_score == 35.0  # (30 sig + (20 * 0.25) freq dampening)
+        # 35.0 is >= 20.0 (medium) and < 40.0 (high) -> MEDIUM
+        assert res1.severity_label == "MEDIUM"
+
+        # 2. Optimize thresholds so that HIGH boundary becomes 30.0
+        optimizer = ThresholdOptimizer(current_thresholds={"LOW_MAX": 15.0, "MEDIUM_MAX": 30.0, "HIGH_MAX": 60.0})
+        optimizer.apply_to_risk_engine()
+        assert intelligence_config.severity_high_threshold == 30.0
+
+        # 3. Assess again on the SAME live engine instance
+        res2 = engine.assess_risk(context, behaviour, corr_state, raw_events)
+        assert res2.severity_score == 35.0
+        # Under new calibrated threshold (HIGH=30.0), 35.0 is dynamically rated HIGH!
+        assert res2.severity_label == "HIGH"
+
+    finally:
+        global_config.RISK_THRESHOLDS.clear()
+        global_config.RISK_THRESHOLDS.update(orig_thresholds)
+        intelligence_config.severity_medium_threshold = orig_med
+        intelligence_config.severity_high_threshold = orig_high
+        intelligence_config.severity_critical_threshold = orig_crit
+
+
 

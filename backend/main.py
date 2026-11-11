@@ -91,6 +91,11 @@ async def lifespan(app: FastAPI):
         await monitoring_service.stop(Role.ADMIN)
     except Exception:
         pass
+    try:
+        from backend.pipeline import event_bus
+        await event_bus.shutdown()
+    except Exception:
+        pass
     await DatabaseManager.close_db()
     await app.state.response_engine.close()
     logger.info("Cleanup complete.")

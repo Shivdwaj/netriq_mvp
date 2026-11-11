@@ -14,6 +14,10 @@ from backend.pipeline.schemas import (
     format_utc_timestamp
 )
 from backend.database.collections import events_repo, threats_repo, idempotency_repo, sensors_repo
+from backend.self_defense.pipeline_guard import (
+    pipeline_guard,
+    PipelineIntegrityError,
+)
 
 logger = get_logger(__name__)
 
@@ -102,6 +106,20 @@ async def ingest_event_batch(
         )
 
     tenant_id = _extract_authenticated_tenant(req)
+    sensor_id = payload.sensor_id
+
+    # Pipeline Integrity Guard Check (HMAC-SHA256, sequence CAS, freshness)
+    raw_body = await req.body()
+    try:
+        verdict = await pipeline_guard.verify_request(
+            raw_body=raw_body,
+            headers=dict(req.headers),
+            authenticated_sensor_id=sensor_id,
+            authenticated_tenant_id=tenant_id
+        )
+    except PipelineIntegrityError as pie:
+        raise HTTPException(status_code=pie.status_code, detail=str(pie))
+
     batch_id = payload.batch_id
     effective_idem_key = idempotency_key or batch_id
 
