@@ -17,6 +17,10 @@ from backend.self_defense.schemas import (
     AuditVerificationResult,
     SecurityAlert,
     TamperType,
+    TrustTier,
+    SensorAnomalyType,
+    SensorAnomalyEvent,
+    SensorTrustScore,
 )
 from backend.self_defense.audit_ledger import (
     CryptographicallySealedAuditLedger,
@@ -29,6 +33,10 @@ from backend.self_defense.watchdog import (
     FileAlertSink,
     MemoryAlertSink,
 )
+from backend.self_defense.sensor_trust import (
+    SensorTrustEngine,
+    sensor_trust_engine,
+)
 
 __all__ = [
     "AuditRecord",
@@ -36,6 +44,10 @@ __all__ = [
     "AuditVerificationResult",
     "SecurityAlert",
     "TamperType",
+    "TrustTier",
+    "SensorAnomalyType",
+    "SensorAnomalyEvent",
+    "SensorTrustScore",
     "CryptographicallySealedAuditLedger",
     "AuditStorageError",
     "AuditTamperError",
@@ -43,5 +55,7 @@ __all__ = [
     "AlertSink",
     "FileAlertSink",
     "MemoryAlertSink",
+    "SensorTrustEngine",
+    "sensor_trust_engine",
 ]
 

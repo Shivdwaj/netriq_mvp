@@ -90,6 +90,7 @@ class SensorHeartbeatReq(BaseModel):
     packets_processed: int = 0
     uptime_seconds: float
     software_version: Optional[str] = None
+    timestamp: Optional[float] = None
 
 # --- Remote Configuration & Rule Distribution Schemas ---
 class SensorConfigUpdateReq(BaseModel):
