@@ -281,7 +281,20 @@ class SensorTrustEngine:
                 except Exception as audit_err:
                     logger.warning(f"[SensorTrustEngine] Could not record trust degradation to audit log: {audit_err}")
 
-            # 7. Persist to storage
+            # 7. Autonomous Response Trigger on Trust Collapse (< 0.50)
+            if state.trust_score < 0.50:
+                try:
+                    from backend.self_defense.response_controller import response_controller
+                    await response_controller.handle_trust_collapse(
+                        sensor_id=sensor_id,
+                        tenant_id=tenant_id,
+                        trust_score=state.trust_score,
+                        reason=f"Heartbeat anomalies caused trust score collapse ({state.trust_score:.2f} < 0.50)",
+                    )
+                except Exception as arc_err:
+                    logger.warning(f"[SensorTrustEngine] Could not notify ARC on trust collapse: {arc_err}")
+
+            # 8. Persist to storage
             await self._persist_state(state)
             return state
 
@@ -333,7 +346,37 @@ class SensorTrustEngine:
             if len(history) > 20:
                 self._volume_history[cache_key] = history[-20:]
 
+            if state.trust_score < 0.50:
+                try:
+                    from backend.self_defense.response_controller import response_controller
+                    await response_controller.handle_trust_collapse(
+                        sensor_id=sensor_id,
+                        tenant_id=tenant_id,
+                        trust_score=state.trust_score,
+                        reason=f"Telemetry anomalies caused trust score collapse ({state.trust_score:.2f} < 0.50)",
+                    )
+                except Exception as arc_err:
+                    logger.warning(f"[SensorTrustEngine] Could not notify ARC on trust collapse: {arc_err}")
+
             return state
+
+    def reset_sensor_trust(self, sensor_id: str, tenant_id: str, new_score: float = 1.0) -> None:
+        """Resets the sensor trust score and clears penalty history upon authorized recovery."""
+        cache_key = (tenant_id, sensor_id)
+        self._trust_cache[cache_key] = SensorTrustScore(
+            sensor_id=sensor_id,
+            tenant_id=tenant_id,
+            trust_score=new_score,
+            trust_tier=self._compute_tier(new_score),
+            observation_count=0,
+            consecutive_healthy=0,
+            recent_anomalies=[],
+            updated_at=get_utc_now_timestamp(),
+            updated_at_iso=get_utc_now_iso(),
+        )
+        if cache_key in self._volume_history:
+            self._volume_history[cache_key] = []
+
 
     async def record_invalid_report(
         self, sensor_id: str, tenant_id: str, reason: str, details: Optional[Dict[str, Any]] = None
