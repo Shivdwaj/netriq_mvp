@@ -76,6 +76,17 @@ class RuleEngine:
         self.cooldown_seconds = cooldown_seconds
         self._states: Dict[str, HostRuleState] = {}
 
+    def get_configuration_state(self) -> Dict[str, Any]:
+        """Returns active rule engine threshold configuration for cryptographic integrity verification."""
+        return {
+            "window_seconds": self.window_seconds,
+            "conn_burst_threshold": self.conn_burst_threshold,
+            "port_scan_threshold": self.port_scan_threshold,
+            "dns_burst_threshold": self.dns_burst_threshold,
+            "failed_conn_threshold": self.failed_conn_threshold,
+            "cooldown_seconds": self.cooldown_seconds,
+        }
+
     def _get_state(self, source_ip: str, now: float) -> HostRuleState:
         if source_ip not in self._states:
             self._states[source_ip] = HostRuleState(source_ip=source_ip, window_seconds=self.window_seconds)

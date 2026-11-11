@@ -231,6 +231,32 @@ class IndependentSecurityWatchdog:
                     f"{result.total_records} records, {result.verified_anchors} anchors."
                 )
 
+            # Step 3: Intelligence Integrity Check (Stage 2 Step 4)
+            try:
+                from backend.self_defense.intelligence_guard import intelligence_guard
+                iig_verdict = await intelligence_guard.run_integrity_sweep()
+                self.last_intelligence_result = iig_verdict
+                if not iig_verdict.is_valid:
+                    self.tamper_alert_count += 1
+                    logger.critical(
+                        f"[Watchdog] INTELLIGENCE INTEGRITY TAMPERING DETECTED: {iig_verdict.error_message}. "
+                        f"Safe Mode Active={iig_verdict.safe_mode_active}"
+                    )
+                    intel_alert = SecurityAlert(
+                        severity=AlertSeverity.CRITICAL,
+                        category=AlertCategory.INTELLIGENCE_TAMPERING,
+                        source="watchdog.intelligence_guard",
+                        message=f"Intelligence integrity violation detected: {iig_verdict.error_message}",
+                        details={
+                            "failed_assets": iig_verdict.failed_assets,
+                            "anomalies": iig_verdict.anomalies,
+                            "safe_mode_active": iig_verdict.safe_mode_active,
+                        },
+                    )
+                    await self.broadcast_alert(intel_alert)
+            except Exception as iex:
+                logger.error(f"[Watchdog] Error during intelligence integrity sweep: {iex}", exc_info=True)
+
             return result
 
         except AuditStorageError as ase:

@@ -105,6 +105,10 @@ class AlertCategory(str, Enum):
     INTEGRITY_VIOLATION = "INTEGRITY_VIOLATION"
     WATCHDOG_HEARTBEAT = "WATCHDOG_HEARTBEAT"
     SENSOR_ANOMALY = "SENSOR_ANOMALY"
+    INTELLIGENCE_TAMPERING = "INTELLIGENCE_TAMPERING"
+    MODEL_TAMPERING = "MODEL_TAMPERING"
+    RULE_TAMPERING = "RULE_TAMPERING"
+    THRESHOLD_TAMPERING = "THRESHOLD_TAMPERING"
 
 
 class SecurityAlert(BaseModel):
@@ -201,5 +205,73 @@ class PipelineIntegrityVerdict(BaseModel):
     gap_size: int = 0
     anomaly_type: Optional[PipelineAnomalyType] = None
     error_message: Optional[str] = None
+
+
+# ==============================================================================
+# Intelligence Integrity Guard Schemas (Step 4)
+# ==============================================================================
+
+class AssetIntegrityType(str, Enum):
+    MODEL = "MODEL"
+    SCALER = "SCALER"
+    ENCODER = "ENCODER"
+    METADATA = "METADATA"
+    VECTORIZER = "VECTORIZER"
+    RULES = "RULES"
+    CONFIG = "CONFIG"
+    SURICATA_YAML = "SURICATA_YAML"
+
+
+class IntelligenceAnomalyType(str, Enum):
+    UNSIGNED_MANIFEST = "UNSIGNED_MANIFEST"
+    INVALID_MANIFEST_SIGNATURE = "INVALID_MANIFEST_SIGNATURE"
+    TAMPERED_MANIFEST = "TAMPERED_MANIFEST"
+    MISSING_ASSET = "MISSING_ASSET"
+    HASH_MISMATCH = "HASH_MISMATCH"
+    THRESHOLD_MISMATCH = "THRESHOLD_MISMATCH"
+    UNAUTHORIZED_RULE_CHANGE = "UNAUTHORIZED_RULE_CHANGE"
+    DESERIALIZATION_BLOCKED = "DESERIALIZATION_BLOCKED"
+
+
+class AssetManifestEntry(BaseModel):
+    """Integrity baseline entry for a single model or config asset."""
+    model_config = ConfigDict(extra="allow")
+
+    relative_path: str
+    sha256: str
+    asset_type: AssetIntegrityType
+    critical: bool = True
+    size_bytes: Optional[int] = None
+
+
+class IntelligenceManifest(BaseModel):
+    """
+    Cryptographically signed release manifest.
+    Contains immutable expected hashes for all model artifacts, metadata,
+    rules, and calibrated baseline risk thresholds.
+    """
+    model_config = ConfigDict(extra="allow")
+
+    manifest_version: str = "1.0.0"
+    release_id: str
+    created_at_iso: str = Field(default_factory=get_utc_now_iso)
+    assets: Dict[str, AssetManifestEntry] = Field(default_factory=dict)
+    thresholds: Dict[str, float] = Field(default_factory=dict)
+    rule_hashes: Dict[str, str] = Field(default_factory=dict)
+    signature: Optional[str] = None
+
+
+class IntelligenceIntegrityVerdict(BaseModel):
+    """Comprehensive evaluation verdict of intelligence assets."""
+    model_config = ConfigDict(extra="allow")
+
+    is_valid: bool
+    safe_mode_active: bool = False
+    verified_assets_count: int = 0
+    failed_assets: List[str] = Field(default_factory=list)
+    anomalies: List[Dict[str, Any]] = Field(default_factory=list)
+    error_message: Optional[str] = None
+    checked_at: float = Field(default_factory=get_utc_now_timestamp)
+    checked_at_iso: str = Field(default_factory=get_utc_now_iso)
 
 

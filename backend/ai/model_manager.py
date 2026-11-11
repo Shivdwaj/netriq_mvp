@@ -55,6 +55,11 @@ class ModelManager:
                     if not (os.path.exists(model_path) and os.path.exists(meta_path)):
                         raise FileNotFoundError(f"Missing {model_file} or {meta_file}")
 
+                    # Step 4: Pre-deserialization integrity verification (Verify BEFORE joblib.load)
+                    from backend.self_defense.intelligence_guard import intelligence_guard
+                    intelligence_guard.verify_file_before_deserialization(model_file, model_path)
+                    intelligence_guard.verify_file_before_deserialization(meta_file, meta_path)
+
                     self._models[traffic_type] = joblib.load(model_path)
                     with open(meta_path, 'r') as f:
                         self._metadata[traffic_type] = json.load(f)
@@ -62,21 +67,37 @@ class ModelManager:
                 # Optional artifacts if present
                 scaler_path = os.path.join(self._models_dir, "scaler.joblib")
                 if os.path.exists(scaler_path):
+                    from backend.self_defense.intelligence_guard import intelligence_guard
+                    intelligence_guard.verify_file_before_deserialization("scaler.joblib", scaler_path)
                     self._scaler = joblib.load(scaler_path)
 
                 encoder_path = os.path.join(self._models_dir, "encoders.joblib")
                 if os.path.exists(encoder_path):
+                    from backend.self_defense.intelligence_guard import intelligence_guard
+                    intelligence_guard.verify_file_before_deserialization("encoders.joblib", encoder_path)
                     self._encoder = joblib.load(encoder_path)
 
                 # System traffic vectorizer
                 vec_path = os.path.join(self._models_dir, "system_logs_vectorizer.joblib")
                 if os.path.exists(vec_path):
+                    from backend.self_defense.intelligence_guard import intelligence_guard
+                    intelligence_guard.verify_file_before_deserialization("system_logs_vectorizer.joblib", vec_path)
                     self._system_vectorizer = joblib.load(vec_path)
                     self._vectorizer = self._system_vectorizer
 
                 logger.info("All models, per-model metadata, and vectorizers loaded successfully.")
 
             except Exception as e:
+                from backend.self_defense.intelligence_guard import IntelligenceIntegrityError
+                if isinstance(e, IntelligenceIntegrityError):
+                    logger.critical(
+                        f"[ModelManager] Refusing fallback to mock models: Integrity violation detected: {e}. "
+                        "Activating Safe Detection Mode (deterministic engines remain operational)."
+                    )
+                    self._safe_mode = True
+                    self._models.clear()
+                    self._metadata.clear()
+                    raise
                 if env == "production":
                     logger.error(f"[FATAL_MODEL_LOAD_ERROR] Could not load models in production mode: {e}")
                     raise ModelLoadError(f"FATAL MODEL LOAD ERROR: {e}") from e
@@ -119,7 +140,16 @@ class ModelManager:
         self._system_vectorizer = MockVectorizer()
 
     def get_model(self, traffic_type: TrafficType) -> Any:
+        from backend.self_defense.intelligence_guard import intelligence_guard, SafeModeActiveError
+        if getattr(self, "_safe_mode", False) or intelligence_guard.is_safe_mode_active():
+            raise SafeModeActiveError(
+                f"Model inference disabled: Intelligence Integrity Guard Safe Mode is active for '{traffic_type}'."
+            )
         self.load_models()
+        if getattr(self, "_safe_mode", False) or intelligence_guard.is_safe_mode_active():
+            raise SafeModeActiveError(
+                f"Model inference disabled: Intelligence Integrity Guard Safe Mode is active for '{traffic_type}'."
+            )
         if traffic_type not in self._models:
             raise ModelLoadError(f"No model found for traffic type {traffic_type}")
         return self._models[traffic_type]

@@ -23,6 +23,11 @@ from backend.self_defense.schemas import (
     SensorTrustScore,
     PipelineAnomalyType,
     PipelineIntegrityVerdict,
+    AssetIntegrityType,
+    IntelligenceAnomalyType,
+    AssetManifestEntry,
+    IntelligenceManifest,
+    IntelligenceIntegrityVerdict,
 )
 from backend.self_defense.audit_ledger import (
     CryptographicallySealedAuditLedger,
@@ -50,6 +55,20 @@ from backend.self_defense.pipeline_guard import (
     ReplaySequenceError,
     derive_sensor_signing_key,
 )
+from backend.self_defense.intelligence_guard import (
+    IntelligenceIntegrityGuard,
+    intelligence_guard,
+    IntelligenceIntegrityError,
+    ManifestSignatureVerificationError,
+    AssetIntegrityError,
+    ThresholdTamperingError,
+    RuleTamperingError,
+    SafeModeActiveError,
+    generate_release_keypair,
+    sign_manifest_payload,
+    verify_manifest_signature,
+    hash_file_sha256,
+)
 
 __all__ = [
     "AuditRecord",
@@ -63,6 +82,11 @@ __all__ = [
     "SensorTrustScore",
     "PipelineAnomalyType",
     "PipelineIntegrityVerdict",
+    "AssetIntegrityType",
+    "IntelligenceAnomalyType",
+    "AssetManifestEntry",
+    "IntelligenceManifest",
+    "IntelligenceIntegrityVerdict",
     "CryptographicallySealedAuditLedger",
     "AuditStorageError",
     "AuditTamperError",
@@ -81,5 +105,17 @@ __all__ = [
     "FutureTimestampError",
     "ReplaySequenceError",
     "derive_sensor_signing_key",
+    "IntelligenceIntegrityGuard",
+    "intelligence_guard",
+    "IntelligenceIntegrityError",
+    "ManifestSignatureVerificationError",
+    "AssetIntegrityError",
+    "ThresholdTamperingError",
+    "RuleTamperingError",
+    "SafeModeActiveError",
+    "generate_release_keypair",
+    "sign_manifest_payload",
+    "verify_manifest_signature",
+    "hash_file_sha256",
 ]
 
